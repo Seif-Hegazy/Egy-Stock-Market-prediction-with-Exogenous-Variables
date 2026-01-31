@@ -1,0 +1,19 @@
+# Anti-Gravity EGX Ingestion DAG - Additional Requirements
+# Add these to your existing Airflow requirements.txt
+
+# Stock data fetching
+yfinance>=0.2.66
+
+# Timezone support (if not already included)
+pytz>=2023.3
+
+# Data processing (usually already in Airflow)
+pandas>=1.5.0
+numpy<2.0.0  # For compatibility with statsmodels
+
+# Logging (usually included)
+# logging - standard library
+
+# Scraping
+requests>=2.31.0
+beautifulsoup4>=4.12.0

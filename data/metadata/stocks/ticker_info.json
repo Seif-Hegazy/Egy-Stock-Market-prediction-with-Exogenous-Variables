@@ -1,0 +1,142 @@
+{
+  "COMI.CA": {
+    "isin": "EGS48701C018",
+    "sector": "Banking"
+  },
+  "CIEB.CA": {
+    "isin": "EGS69061C018",
+    "sector": "Banking"
+  },
+  "HDBK.CA": {
+    "isin": "EGS48721C012",
+    "sector": "Banking"
+  },
+  "FAIT.CA": {
+    "isin": "EGS48681C016",
+    "sector": "Banking"
+  },
+  "ADIB.CA": {
+    "isin": "EGS69701C011",
+    "sector": "Banking"
+  },
+  "SAUD.CA": {
+    "isin": "EGS65251C013",
+    "sector": "Banking"
+  },
+  "EGBE.CA": {
+    "isin": "EGS48691C015",
+    "sector": "Banking"
+  },
+  "EXPA.CA": {
+    "isin": "EGS48651C019",
+    "sector": "Banking"
+  },
+  "HRHO.CA": {
+    "isin": "EGS48771C015",
+    "sector": "Financial Services"
+  },
+  "EFIH.CA": {
+    "isin": "EGS69131C012",
+    "sector": "Financial Services"
+  },
+  "FWRY.CA": {
+    "isin": "EGS69061C018",
+    "sector": "Financial Services"
+  },
+  "BTFH.CA": {
+    "isin": "EGS48011C015",
+    "sector": "Financial Services"
+  },
+  "CICH.CA": {
+    "isin": "EGS30171C013",
+    "sector": "Financial Services"
+  },
+  "PHDC.CA": {
+    "isin": "EGS65431C011",
+    "sector": "Real Estate"
+  },
+  "OCDI.CA": {
+    "isin": "EGS65511C015",
+    "sector": "Real Estate"
+  },
+  "MASR.CA": {
+    "isin": "EGS673S1C011",
+    "sector": "Real Estate"
+  },
+  "HELI.CA": {
+    "isin": "EGS48091C013",
+    "sector": "Real Estate"
+  },
+  "ORAS.CA": {
+    "isin": "EGS655A1C012",
+    "sector": "Real Estate"
+  },
+  "EMFD.CA": {
+    "isin": "EGS65391C010",
+    "sector": "Real Estate"
+  },
+  "SWDY.CA": {
+    "isin": "EGS65061C015",
+    "sector": "Industrial"
+  },
+  "ABUK.CA": {
+    "isin": "EGS30011C010",
+    "sector": "Industrial"
+  },
+  "MFPC.CA": {
+    "isin": "EGS65331C016",
+    "sector": "Industrial"
+  },
+  "SKPC.CA": {
+    "isin": "EGS65481C019",
+    "sector": "Industrial"
+  },
+  "AMOC.CA": {
+    "isin": "EGS30061C013",
+    "sector": "Industrial"
+  },
+  "ETEL.CA": {
+    "isin": "EGS72271C016",
+    "sector": "Telecom"
+  },
+  "EAST.CA": {
+    "isin": "EGS66051C010",
+    "sector": "Consumer"
+  },
+  "JUFO.CA": {
+    "isin": "EGS65181C018",
+    "sector": "Consumer"
+  },
+  "EFID.CA": {
+    "isin": "EGS65071C014",
+    "sector": "Consumer"
+  },
+  "ISPH.CA": {
+    "isin": "EGS65731C019",
+    "sector": "Consumer"
+  },
+  "CLHO.CA": {
+    "isin": "EGS30151C013",
+    "sector": "Healthcare"
+  },
+  "GBCO.CA": {
+    "isin": "EGS300T1C013",
+    "sector": "Holdings"
+  },
+  "EKHO.CA": {
+    "isin": "EGS52491C011",
+    "sector": "Holdings"
+  },
+  "ORHD.CA": {
+    "isin": "EGS655L1C011",
+    "sector": "Consumer"
+  },
+  "TMGH.CA": {
+    "isin": "EGS691S1C011",
+    "sector": "Real Estate"
+  },
+  "CCAP.CA": {
+    "isin": "EGS69082C013",
+    "sector": "Holdings"
+  }
+}

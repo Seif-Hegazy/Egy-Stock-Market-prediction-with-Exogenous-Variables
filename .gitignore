@@ -1,0 +1,79 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+.eggs/
+*.egg-info/
+*.egg
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+*.local
+
+# Logs
+logs/
+*.log
+airflow/logs/
+
+# Docker
+.docker/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Cache
+.cache/
+*.cache
+
+# Build
+build/
+dist/
+
+# Don't ignore data - we want it in the repo
+# data/
+
+# MLflow
+mlruns/
+
+# Airflow metadata (but keep DAGs)
+airflow/airflow.db
+airflow/airflow.cfg
+airflow/webserver_config.py
+airflow/airflow-webserver.pid
+
+# Model files (large)
+*.h5
+*.pkl
+*.joblib
+*.gguf
+*.bin
+models/*.bin
+services/sentiment-analysis/models/
+
+# Secrets
+*.pem
+*.key
+secrets/

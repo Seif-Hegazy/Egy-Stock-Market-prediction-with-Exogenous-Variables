@@ -1,0 +1,19 @@
+{
+  "created": "2025-12-12T21:58:48.757259",
+  "date_range": "2013-01-02 to 2025-12-12",
+  "total_rows": 4728,
+  "sources": {
+    "gdp_usd_billion": "World Bank Open Data (NY.GDP.MKTP.CD)",
+    "cbe_deposit_rate": "Central Bank of Egypt official announcements",
+    "cbe_lending_rate": "Central Bank of Egypt official announcements",
+    "headline_inflation": "CAPMAS / Central Bank of Egypt monthly reports",
+    "usd_sell_rate": "Central Bank of Egypt official exchange rates",
+    "gold_24k": "Egyptian gold market prices"
+  },
+  "notes": {
+    "no_interpolation": "All values are actual data points, no interpolation used",
+    "cbe_rates": "Rates forward-filled from official announcement dates",
+    "inflation": "Monthly/annual values only where officially reported",
+    "gdp": "Annual values from World Bank"
+  }
+}

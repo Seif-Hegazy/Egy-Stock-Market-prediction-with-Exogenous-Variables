@@ -1,0 +1,19 @@
+{
+  "updated": "2025-12-13T04:37:07.495345",
+  "version": "Complete 13-Year Dataset - No NULLs",
+  "date_range": "2013-01-02 to 2025-12-12",
+  "total_rows": 4728,
+  "complete_rows": 4728,
+  "completeness": "100.0%",
+  "inflation_filled": {
+    "2024": "Monthly CAPMAS/CBE official data",
+    "2025": "Monthly CAPMAS/CBE official data + reasonable estimates"
+  },
+  "gdp_filled": {
+    "2025": "$406.5B (IMF projection based on 4.5% growth)"
+  },
+  "sources": {
+    "inflation_2024_2025": "CAPMAS monthly CPI + CBE reports",
+    "gdp_2025": "IMF FY2025/26 growth forecast (4.5%)"
+  }
+}
