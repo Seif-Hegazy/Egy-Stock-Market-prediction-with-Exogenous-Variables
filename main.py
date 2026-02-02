@@ -20,20 +20,20 @@ from tqdm import tqdm
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.data_loader_v3 import load_raw_data, construct_rolling_windows, prepare_datasets
-from src.models_v3 import train_model, get_percentile_threshold, evaluate_model
+from src.data_loader import load_raw_data, construct_rolling_windows, prepare_datasets
+from src.models import train_model, get_percentile_threshold, evaluate_model
 from src.validation import diebold_mariano_test, compute_squared_loss, is_significant
 
 warnings.filterwarnings('ignore')
 
-RESULTS_DIR = Path(__file__).parent / 'results' / 'v3'
+RESULTS_DIR = Path(__file__).parent / 'results'
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def run_experiment():
     print("=" * 70)
-    print("EGX PREDICTION MODEL v3 - RESEARCH FRAMEWORK")
-    print("5-day Rolling Window | Neutral Zone Labeling | Fixed Q0.40 Threshold")
+    print("EGX PREDICTION MODEL - MACRO SIGNIFICANCE STUDY")
+    print("Model: HistGradientBoosting (LightGBM) | 5-day Rolling Window | Q0.40")
     print("=" * 70)
     
     # 1. Load Data
