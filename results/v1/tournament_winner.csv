@@ -1,0 +1,33 @@
+Ticker,Sector,Best_Window,Best_Lift_%,Significant_Alpha?
+ABUK.CA,Industrial,Reactionary,-5.71136691633067,Yes
+ADIB.CA,Banking,Strategic,0.5848095767868899,Yes
+AMOC.CA,Industrial,Reactionary,-3.6374598633656006,No
+BTFH.CA,Financial Services,Reactionary,-2.888445298045765,Yes
+CICH.CA,Financial Services,Reactionary,2.3088358466089365,Yes
+CIEB.CA,Banking,Tactical,-1.6983412652235268,No
+CLHO.CA,Healthcare,Reactionary,-8.101067912029846,No
+COMI.CA,Banking,Strategic,-3.094633818142152,No
+EAST.CA,Consumer,Tactical,-0.7071379886901177,No
+EFID.CA,Consumer,Strategic,0.6377226320541245,Yes
+EFIH.CA,Financial Services,Tactical,3.4372981599196564,No
+EKHO.CA,Holdings,Tactical,-2.0664483893248735,No
+EMFD.CA,Real Estate,Strategic,5.598852002385661,No
+ETEL.CA,Telecom,Reactionary,-4.32643214562281,No
+EXPA.CA,Banking,Strategic,-1.7909733319175007,No
+FAIT.CA,Banking,Strategic,1.1169494346733544,No
+FWRY.CA,Financial Services,Tactical,9.167726951346356,No
+GBCO.CA,Holdings,Reactionary,-1.3277061507673602,No
+HDBK.CA,Banking,Strategic,1.9364823764275416,No
+HELI.CA,Real Estate,Tactical,-1.370912442314009,Yes
+HRHO.CA,Financial Services,Tactical,0.6754787137931798,No
+ISPH.CA,Consumer,Strategic,-2.2449132411561985,No
+JUFO.CA,Consumer,Strategic,-3.4488461847883705,Yes
+MASR.CA,Real Estate,Strategic,1.1008357965674118,No
+MFPC.CA,Industrial,Strategic,6.085485101803522,No
+OCDI.CA,Real Estate,Tactical,0.3800209246497193,No
+ORAS.CA,Real Estate,Strategic,-100.0,Yes
+ORHD.CA,Consumer,Strategic,4.822785316254306,Yes
+PHDC.CA,Real Estate,Strategic,3.5571307828562153,No
+SAUD.CA,Banking,Strategic,-0.5272489117007269,Yes
+SKPC.CA,Industrial,Strategic,-0.8394075617261959,No
+SWDY.CA,Industrial,Strategic,-0.8103070305991016,No

@@ -8,20 +8,39 @@ A comprehensive ML pipeline for Egyptian stock market prediction using sentiment
 Grad Project/
 ├── airflow/              # Airflow DAGs for automated data collection
 │   └── dags/
-│       ├── egx_stock_ingestion.py      # Stock data from yfinance
-│       ├── egypt_economic_dag.py       # Economic indicators (CBE, gold, FX)
-│       └── sentiment_collection.py     # News sentiment analysis
 ├── data/
 │   ├── raw/
-│   │   ├── stocks/       # EGX daily prices (35 tickers, 12+ years)
+│   │   ├── stocks/       # EGX daily prices (35 tickers)
 │   │   ├── economic/     # USD/EGP, gold, inflation, interest rates
-│   │   └── news/         # Articles with sentiment scores
-│   ├── processed/        # Engineered features
-│   └── model_ready/      # Training-ready datasets
-├── services/
-│   └── sentiment-analysis/   # Groq-powered sentiment pipeline
+│   │   └── global/       # S&P500, VIX, Oil, etc.
+├── docs/                 # Documentation and Research Plans
+├── experiments/          # Archived experimental scripts (v1, v2)
+├── main.py               # PRIMARY ENTRY POINT (v3.1 Research Framework)
 ├── models/               # Trained prediction models
-└── notebooks/            # Analysis and experimentation
+├── results/              # Experiment results
+│   ├── v1/               # Initial findings
+│   └── v3/               # Final v3.1 Research Results (Robust Winners)
+├── src/                  # Core Source Code
+│   ├── data_loader_v3.py # Rolling window logic
+│   └── models_v3.py      # CatBoost implementation
+└── ...
+```
+
+## 🧠 Research Framework (v3.1)
+
+The project implements a rigorous hypothesis test: **"Do global/local macroeconomic variables improve weekly stock direction prediction for EGX30 stocks?"**
+- **Window**: 5-Day concatenated rolling window ($W_0 + W_1 \to Target_{W2}$).
+- **Model**: CatBoost with Fixed 40th Percentile Threshold (Q0.40).
+- **Control**: Technicals Only (Price + RSI + Volatility + Momentum).
+- **Test**: Technicals + Macro (Gold, Oil, VIX, USD, Interest Rates).
+
+**Key Findings:**
+- **Construction (ORAS, SAUD)** and **Banking (EGBE, CICH)** show statistically significant improvement with macro data.
+- **Recall** (Trend Capture) is the primary driver of alpha.
+
+### 🚀 Running the Experiment
+```bash
+python3 main.py
 ```
 
 ## 📊 Data Coverage
