@@ -1,15 +1,11 @@
 """
-EGX Macro Significance Study - Feature Engineering Pipeline
-============================================================
-Implements two parallel pipelines:
-1. ENDOGENOUS: Price + Volume + Technical Indicators
-2. EXOGENOUS: Endogenous + Macroeconomic Variables
-
-Improvements over v3:
-- Added Volume features (volume_ratio, volume_ma)
-- Added MACD indicator
-- Increased neutral zone margin to 1% for cleaner signals
-- Cleaner separation of feature sets
+EGX Macro Significance Study - Feature Engineering Pipeline (v2)
+================================================================
+Fixed Issues:
+1. Unified correlation filtering (same features for both pipelines)
+2. Improved windowing with non-overlapping samples
+3. Better target definition (end-to-end return)
+4. Quality thresholds for sample size
 """
 
 import pandas as pd
@@ -26,7 +22,8 @@ DATA_DIR = PROJECT_ROOT / 'data'
 
 # Windowing parameters
 WINDOW_SIZE = 5  # 1 trading week
-NEUTRAL_MARGIN = 0.01  # 1% neutral zone (improved from 0.1%)
+NEUTRAL_MARGIN = 0.01  # 1% neutral zone
+MIN_SAMPLES = 200  # Minimum samples required per ticker
 
 # Feature definitions
 TECHNICAL_FEATURES = [
@@ -87,7 +84,7 @@ def load_raw_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
 
 
 # =============================================================================
-# Technical Indicators (Endogenous Features)
+# Technical Indicators
 # =============================================================================
 
 def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
@@ -109,71 +106,66 @@ def compute_macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int 
 
 
 def add_technical_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Compute all technical indicators (endogenous features).
-    These are calculated per-ticker using groupby.
-    """
+    """Compute all technical indicators."""
     df = df.copy()
     
-    # 1. Returns (multiple timeframes)
+    # Returns
     df['ret_1w'] = df.groupby('Ticker')['Close'].pct_change(5)
     df['ret_2w'] = df.groupby('Ticker')['Close'].pct_change(10)
     df['ret_1m'] = df.groupby('Ticker')['Close'].pct_change(20)
     
-    # 2. Volatility (20-day rolling std of returns)
+    # Volatility
     df['vol_1m'] = df.groupby('Ticker')['Close'].pct_change().rolling(20).std().reset_index(0, drop=True)
     
-    # 3. RSI (14-day)
+    # RSI
     df['rsi_14'] = df.groupby('Ticker')['Close'].apply(compute_rsi).reset_index(0, drop=True)
     
-    # 4. Momentum (Price / 20-day MA)
+    # Momentum
     df['ma_20'] = df.groupby('Ticker')['Close'].rolling(20).mean().reset_index(0, drop=True)
     df['mom_20'] = df['Close'] / df['ma_20']
     
-    # 5. MACD
-    macd_results = df.groupby('Ticker')['Close'].apply(lambda x: pd.DataFrame(dict(zip(['macd', 'macd_signal'], compute_macd(x)))))
+    # MACD
+    macd_results = df.groupby('Ticker')['Close'].apply(
+        lambda x: pd.DataFrame(dict(zip(['macd', 'macd_signal'], compute_macd(x))))
+    )
     macd_results = macd_results.reset_index(level=0, drop=True)
     df['macd'] = macd_results['macd']
     df['macd_signal'] = macd_results['macd_signal']
     
-    # 6. Volume features
+    # Volume
     df['volume_ma_20'] = df.groupby('Ticker')['Volume'].rolling(20).mean().reset_index(0, drop=True)
     df['volume_ratio'] = df['Volume'] / df['volume_ma_20']
     
-    # Fill NaNs (early periods)
     df = df.fillna(0)
-    
     return df
 
 
 # =============================================================================
-# Window Construction (Dual Pipeline)
+# Window Construction (FIXED: Non-overlapping, Clear Target)
 # =============================================================================
 
 def construct_samples(df_ticker: pd.DataFrame, 
                       df_macro: pd.DataFrame,
                       include_macro: bool = True,
                       w: int = WINDOW_SIZE,
-                      margin: float = NEUTRAL_MARGIN) -> pd.DataFrame:
+                      margin: float = NEUTRAL_MARGIN,
+                      step: int = None) -> pd.DataFrame:
     """
     Construct rolling window samples.
     
-    Args:
-        df_ticker: Stock data for one ticker
-        df_macro: Macro data
-        include_macro: If True, include macro features (Exogenous pipeline)
-                       If False, only include technical features (Endogenous pipeline)
-        w: Window size in days
-        margin: Neutral zone margin
-        
-    Returns:
-        DataFrame of samples with features and target
+    FIXED:
+    - step parameter for non-overlapping windows (default: w for non-overlap)
+    - Clear target: price at end of Week 2 vs price at end of Week 1
+    - No lookahead bias
     """
+    if step is None:
+        step = w  # Non-overlapping by default
+    
     # 1. Merge ticker with macro
     df = df_ticker.merge(df_macro, on='Date', how='left')
     df = df.sort_values('Date').reset_index(drop=True)
     
-    # 2. Fill missing macro (forward fill)
+    # 2. Fill missing macro
     for col in MACRO_FEATURES:
         if col in df.columns:
             df[col] = df[col].ffill()
@@ -183,10 +175,10 @@ def construct_samples(df_ticker: pd.DataFrame,
     
     samples = []
     total_len = len(df)
-    max_idx = total_len - 3 * w
     
-    for i in range(max_idx + 1):
-        # Indices for each week
+    # Use step size for iteration (non-overlapping windows)
+    i = 0
+    while i + 3 * w <= total_len:
         idx_week0 = slice(i, i + w)
         idx_week1 = slice(i + w, i + 2 * w)
         idx_week2 = slice(i + 2 * w, i + 3 * w)
@@ -195,51 +187,62 @@ def construct_samples(df_ticker: pd.DataFrame,
         chunk_week1 = df.iloc[idx_week1]
         chunk_week2 = df.iloc[idx_week2]
         
-        # --- Label Construction (using end-of-week prices for cleaner signal) ---
-        p_past = chunk_week1['Close'].iloc[-1]  # Last price of Week 1
-        p_future = chunk_week2['Close'].iloc[-1]  # Last price of Week 2
+        # --- FIXED: Clear Target Definition ---
+        # Price at end of observation period (Week 1, last day)
+        p_now = chunk_week1['Close'].iloc[-1]
+        # Price at end of prediction period (Week 2, last day)
+        p_future = chunk_week2['Close'].iloc[-1]
         
-        if p_past == 0:
+        if p_now == 0:
+            i += step
             continue
             
-        ratio = p_future / p_past
+        # Simple return
+        ret = (p_future - p_now) / p_now
         
-        # Apply neutral zone filter
-        if (1.0 - margin) <= ratio <= (1.0 + margin):
+        # Neutral zone filter
+        if -margin <= ret <= margin:
+            i += step
             continue
             
-        target = 1 if ratio > (1.0 + margin) else 0
+        target = 1 if ret > margin else 0
         
         # --- Feature Construction ---
         features = {}
         
         def add_window_features(prefix, col_name):
-            """Add features from Week 0 and Week 1."""
-            for d in range(w):
-                features[f'{prefix}_w0_d{d}'] = chunk_week0[col_name].iloc[d]
-            for d in range(w):
-                features[f'{prefix}_w1_d{d}'] = chunk_week1[col_name].iloc[d]
+            """Add SUMMARY features from each window (not daily)."""
+            # Week 0 summary
+            features[f'{prefix}_w0_mean'] = chunk_week0[col_name].mean()
+            features[f'{prefix}_w0_std'] = chunk_week0[col_name].std()
+            features[f'{prefix}_w0_last'] = chunk_week0[col_name].iloc[-1]
+            # Week 1 summary
+            features[f'{prefix}_w1_mean'] = chunk_week1[col_name].mean()
+            features[f'{prefix}_w1_std'] = chunk_week1[col_name].std()
+            features[f'{prefix}_w1_last'] = chunk_week1[col_name].iloc[-1]
         
-        # 1. Price (always included)
+        # 1. Price
         add_window_features('price', 'Close')
         
-        # 2. Technical Features (always included)
+        # 2. Technical
         for col in TECHNICAL_FEATURES:
             if col in df.columns:
                 add_window_features(f'tech_{col}', col)
         
-        # 3. Macro Features (only if include_macro=True)
+        # 3. Macro (only if requested)
         if include_macro:
             for col in MACRO_FEATURES:
                 if col in df.columns:
                     add_window_features(f'macro_{col}', col)
         
         # Metadata
-        features['Date'] = df.iloc[i + 2 * w - 1]['Date']
+        features['Date'] = chunk_week1['Date'].iloc[-1]  # End of observation
         features['Ticker'] = df['Ticker'].iloc[0]
         features['Target'] = target
+        features['Return'] = ret  # Store for debugging
         
         samples.append(features)
+        i += step
     
     return pd.DataFrame(samples)
 
@@ -251,15 +254,9 @@ def construct_samples(df_ticker: pd.DataFrame,
 def prepare_datasets(df_samples: pd.DataFrame, 
                      test_ratio: float = 0.20,
                      val_ratio: float = 0.10) -> Dict:
-    """
-    Split data chronologically and normalize using training stats.
-    
-    Returns:
-        Dictionary with X_train, y_train, X_val, y_val, X_test, y_test
-    """
+    """Split data chronologically and normalize."""
     n = len(df_samples)
     
-    # Chronological Split
     test_size = int(n * test_ratio)
     train_val_size = n - test_size
     val_size = int(train_val_size * val_ratio)
@@ -269,19 +266,17 @@ def prepare_datasets(df_samples: pd.DataFrame,
     val = df_samples.iloc[train_size:train_size+val_size]
     test = df_samples.iloc[train_size+val_size:]
     
-    # Feature columns (exclude metadata)
-    feature_cols = [c for c in df_samples.columns if c not in ['Date', 'Ticker', 'Target']]
+    # Feature columns
+    feature_cols = [c for c in df_samples.columns if c not in ['Date', 'Ticker', 'Target', 'Return']]
     
     X_train = train[feature_cols].copy()
     y_train = train['Target']
-    
     X_val = val[feature_cols].copy()
     y_val = val['Target']
-    
     X_test = test[feature_cols].copy()
     y_test = test['Target']
     
-    # Z-Score Normalization (using Train stats only)
+    # Z-Score Normalization
     mu = X_train.mean()
     sigma = X_train.std().replace(0, 1)
     
@@ -294,21 +289,21 @@ def prepare_datasets(df_samples: pd.DataFrame,
         'X_val': X_val_norm, 'y_val': y_val,
         'X_test': X_test_norm, 'y_test': y_test,
         'feature_names': feature_cols,
-        'metadata_test': test[['Date', 'Ticker']]
+        'metadata_test': test[['Date', 'Ticker', 'Return']]
     }
 
 
 # =============================================================================
-# Convenience Functions for Experiments
+# Convenience Functions
 # =============================================================================
 
 def create_endogenous_samples(df_ticker: pd.DataFrame, df_macro: pd.DataFrame) -> pd.DataFrame:
-    """Create samples with ONLY endogenous features (Technical indicators)."""
+    """Create samples with ONLY endogenous features."""
     return construct_samples(df_ticker, df_macro, include_macro=False)
 
 
 def create_exogenous_samples(df_ticker: pd.DataFrame, df_macro: pd.DataFrame) -> pd.DataFrame:
-    """Create samples with endogenous + exogenous features (Technical + Macro)."""
+    """Create samples with endogenous + exogenous features."""
     return construct_samples(df_ticker, df_macro, include_macro=True)
 
 
@@ -317,26 +312,22 @@ def create_exogenous_samples(df_ticker: pd.DataFrame, df_macro: pd.DataFrame) ->
 # =============================================================================
 
 if __name__ == '__main__':
-    print("Testing Feature Engineering Pipeline...")
+    print("Testing FIXED Feature Engineering Pipeline...")
     stocks, macro = load_raw_data()
     print(f"Loaded {len(stocks):,} stock rows, {len(macro):,} macro rows")
     
     ticker = 'COMI.CA'
     df_ticker = stocks[stocks['Ticker'] == ticker].copy()
     
-    print(f"\n--- ENDOGENOUS PIPELINE (Technical Only) ---")
+    print(f"\n--- ENDOGENOUS PIPELINE ---")
     endo_samples = create_endogenous_samples(df_ticker, macro)
-    endo_features = [c for c in endo_samples.columns if c not in ['Date', 'Ticker', 'Target']]
-    print(f"Samples: {len(endo_samples)}")
+    endo_features = [c for c in endo_samples.columns if c not in ['Date', 'Ticker', 'Target', 'Return']]
+    print(f"Samples: {len(endo_samples)} (non-overlapping)")
     print(f"Features: {len(endo_features)}")
+    print(f"Target Balance: {endo_samples['Target'].value_counts(normalize=True).to_dict()}")
     
-    print(f"\n--- EXOGENOUS PIPELINE (Technical + Macro) ---")
+    print(f"\n--- EXOGENOUS PIPELINE ---")
     exo_samples = create_exogenous_samples(df_ticker, macro)
-    exo_features = [c for c in exo_samples.columns if c not in ['Date', 'Ticker', 'Target']]
+    exo_features = [c for c in exo_samples.columns if c not in ['Date', 'Ticker', 'Target', 'Return']]
     print(f"Samples: {len(exo_samples)}")
     print(f"Features: {len(exo_features)}")
-    
-    print(f"\n--- FEATURE BREAKDOWN ---")
-    print(f"Endogenous features: {len(endo_features)}")
-    print(f"Exogenous features: {len(exo_features)}")
-    print(f"Macro features added: {len(exo_features) - len(endo_features)}")

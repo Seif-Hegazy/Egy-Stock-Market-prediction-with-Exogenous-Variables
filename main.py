@@ -1,12 +1,11 @@
 """
-EGX Macro Significance Study - Main Experiment Runner
-======================================================
-Compares Endogenous-only model vs Exogenous-enhanced model
-using identical feature engineering, windowing, and thresholding.
-
-Includes:
-- Correlation-based feature filtering (removes multicollinearity)
-- Feature importance analysis before training
+EGX Macro Significance Study - Main Experiment Runner (v2 FIXED)
+================================================================
+Fixes:
+1. Unified correlation filtering (exogenous features, then subset for endogenous)
+2. Minimum quality thresholds (samples, F1)
+3. Non-overlapping windows
+4. Better reporting
 """
 
 import sys
@@ -17,14 +16,14 @@ import pandas as pd
 import numpy as np
 from tqdm import tqdm
 
-# Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from src.data_loader import (
     load_raw_data, 
     create_endogenous_samples, 
     create_exogenous_samples,
-    prepare_datasets
+    prepare_datasets,
+    MIN_SAMPLES
 )
 from src.models import train_model, get_percentile_threshold, evaluate_model
 from src.validation import diebold_mariano_test, compute_squared_loss, is_significant
@@ -36,14 +35,14 @@ RESULTS_DIR = Path(__file__).parent / 'results'
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Configuration
-CORRELATION_THRESHOLD = 0.85  # Features with correlation > this are filtered
+CORRELATION_THRESHOLD = 0.85
+MIN_F1_THRESHOLD = 0.30  # Exclude tickers where even baseline fails
 
 
 def run_experiment():
     print("=" * 70)
-    print("EGX MACRO SIGNIFICANCE STUDY")
-    print("Endogenous (Technical) vs Exogenous (Technical + Macro)")
-    print("With Correlation Filtering (threshold={})".format(CORRELATION_THRESHOLD))
+    print("EGX MACRO SIGNIFICANCE STUDY (v2 FIXED)")
+    print("Non-overlapping windows | Unified correlation filtering | Quality gates")
     print("=" * 70)
     
     # 1. Load Data
@@ -52,151 +51,156 @@ def run_experiment():
     print(f"  Stocks: {len(stocks):,} rows")
     print(f"  Macro:  {len(macro):,} rows")
     
-    # Get unique tickers
     tickers = stocks['Ticker'].unique()
     print(f"\n[2] Running Experiment for {len(tickers)} tickers...")
     
     results = []
     feature_importance_all = []
+    skipped = {'insufficient_samples': [], 'low_baseline': []}
     
     for ticker in tqdm(tickers):
         df_ticker = stocks[stocks['Ticker'] == ticker].copy()
         
-        # Skip tickers with insufficient data
+        # Skip tickers with insufficient raw data
         if len(df_ticker) < 500:
             continue
         
-        # --- Pipeline A: Endogenous Only (Technical) ---
-        samples_a = create_endogenous_samples(df_ticker, macro)
-        if len(samples_a) < 100:
+        # --- Generate Samples ---
+        samples_exo = create_exogenous_samples(df_ticker, macro)
+        samples_endo = create_endogenous_samples(df_ticker, macro)
+        
+        # Quality Gate 1: Minimum samples
+        if len(samples_exo) < MIN_SAMPLES:
+            skipped['insufficient_samples'].append(ticker)
             continue
-            
-        data_a = prepare_datasets(samples_a)
         
-        # --- Pipeline B: Exogenous (Technical + Macro) ---
-        samples_b = create_exogenous_samples(df_ticker, macro)
-        data_b = prepare_datasets(samples_b)
+        # Prepare datasets
+        data_exo = prepare_datasets(samples_exo)
+        data_endo = prepare_datasets(samples_endo)
         
-        # --- CORRELATION FILTERING (Before Training) ---
-        # Filter features for Endogenous pipeline
-        X_train_a_filtered, dropped_a = remove_correlated_features(
-            data_a['X_train'], data_a['y_train'], 
+        # --- UNIFIED Correlation Filtering ---
+        # Step 1: Filter on EXOGENOUS features (full set)
+        X_train_exo_filtered, dropped_exo = remove_correlated_features(
+            data_exo['X_train'], data_exo['y_train'],
             threshold=CORRELATION_THRESHOLD, verbose=False
         )
+        keep_cols_exo = X_train_exo_filtered.columns.tolist()
         
-        # Apply same filter to val/test
-        keep_cols_a = X_train_a_filtered.columns.tolist()
-        X_val_a_filtered = data_a['X_val'][keep_cols_a]
-        X_test_a_filtered = data_a['X_test'][keep_cols_a]
+        # Step 2: Apply same filter to exo val/test
+        X_val_exo = data_exo['X_val'][keep_cols_exo]
+        X_test_exo = data_exo['X_test'][keep_cols_exo]
         
-        # Filter features for Exogenous pipeline
-        X_train_b_filtered, dropped_b = remove_correlated_features(
-            data_b['X_train'], data_b['y_train'], 
-            threshold=CORRELATION_THRESHOLD, verbose=False
-        )
+        # Step 3: For ENDOGENOUS, use subset of exo features (non-macro only)
+        keep_cols_endo = [c for c in keep_cols_exo if not c.startswith('macro_')]
+        X_train_endo = data_endo['X_train'][[c for c in keep_cols_endo if c in data_endo['X_train'].columns]]
+        X_val_endo = data_endo['X_val'][[c for c in keep_cols_endo if c in data_endo['X_val'].columns]]
+        X_test_endo = data_endo['X_test'][[c for c in keep_cols_endo if c in data_endo['X_test'].columns]]
         
-        # Apply same filter to val/test
-        keep_cols_b = X_train_b_filtered.columns.tolist()
-        X_val_b_filtered = data_b['X_val'][keep_cols_b]
-        X_test_b_filtered = data_b['X_test'][keep_cols_b]
-        
-        # --- Feature Importance Analysis (for reporting) ---
-        if ticker == tickers[0]:  # Only for first ticker (representative)
-            importance_b = analyze_feature_importance(X_train_b_filtered, data_b['y_train'])
-            importance_b['Ticker'] = ticker
-            feature_importance_all.append(importance_b)
+        # Feature importance (first ticker only)
+        if len(feature_importance_all) == 0:
+            importance = analyze_feature_importance(X_train_exo_filtered, data_exo['y_train'])
+            importance['Ticker'] = ticker
+            feature_importance_all.append(importance)
         
         # --- Train Models ---
-        model_a = train_model(X_train_a_filtered, data_a['y_train'],
-                              X_val_a_filtered, data_a['y_val'])
-        model_b = train_model(X_train_b_filtered, data_b['y_train'],
-                              X_val_b_filtered, data_b['y_val'])
+        try:
+            model_endo = train_model(X_train_endo, data_endo['y_train'],
+                                     X_val_endo, data_endo['y_val'])
+            model_exo = train_model(X_train_exo_filtered, data_exo['y_train'],
+                                    X_val_exo, data_exo['y_val'])
+        except Exception as e:
+            print(f"  ERROR {ticker}: {e}")
+            continue
         
-        # Get thresholds (fixed percentile)
-        thresh_a = get_percentile_threshold(model_a, X_val_a_filtered, quantile=0.40)
-        thresh_b = get_percentile_threshold(model_b, X_val_b_filtered, quantile=0.40)
+        # Thresholds
+        thresh_endo = get_percentile_threshold(model_endo, X_val_endo, quantile=0.40)
+        thresh_exo = get_percentile_threshold(model_exo, X_val_exo, quantile=0.40)
         
-        # Evaluate on Test Set
-        y_true = data_a['y_test']
+        # Evaluate
+        y_true = data_endo['y_test']
+        metrics_endo = evaluate_model(model_endo, X_test_endo, y_true, thresh_endo)
+        metrics_exo = evaluate_model(model_exo, X_test_exo, y_true, thresh_exo)
         
-        metrics_a = evaluate_model(model_a, X_test_a_filtered, y_true, thresh_a)
-        metrics_b = evaluate_model(model_b, X_test_b_filtered, y_true, thresh_b)
+        # Quality Gate 2: Minimum baseline F1
+        if metrics_endo['f1'] < MIN_F1_THRESHOLD:
+            skipped['low_baseline'].append((ticker, metrics_endo['f1']))
+            continue
         
-        # Statistical Test (Diebold-Mariano)
-        probs_a = model_a.predict_proba(X_test_a_filtered)[:, 1]
-        probs_b = model_b.predict_proba(X_test_b_filtered)[:, 1]
+        # Statistical Test
+        probs_endo = model_endo.predict_proba(X_test_endo)[:, 1]
+        probs_exo = model_exo.predict_proba(X_test_exo)[:, 1]
         
-        loss_a = compute_squared_loss(y_true.values, probs_a)
-        loss_b = compute_squared_loss(y_true.values, probs_b)
+        loss_endo = compute_squared_loss(y_true.values, probs_endo)
+        loss_exo = compute_squared_loss(y_true.values, probs_exo)
         
-        dm_stat, p_value = diebold_mariano_test(loss_a, loss_b)
+        dm_stat, p_value = diebold_mariano_test(loss_endo, loss_exo)
         
-        # Store Results
+        # Compute lift
+        lift = (metrics_exo['f1'] - metrics_endo['f1']) / metrics_endo['f1'] if metrics_endo['f1'] > 0 else 0
+        
         res = {
             'Ticker': ticker,
-            'Samples': len(samples_a),
+            'Samples': len(samples_exo),
             'Test_Size': len(y_true),
+            'Endo_Features': len(X_train_endo.columns),
+            'Exo_Features': len(keep_cols_exo),
             
-            # Feature counts after filtering
-            'Endo_Features': len(keep_cols_a),
-            'Exo_Features': len(keep_cols_b),
+            'Endo_F1': metrics_endo['f1'],
+            'Endo_Precision': metrics_endo['precision'],
+            'Endo_Recall': metrics_endo['recall'],
             
-            # Model A (Endogenous)
-            'Endo_F1': metrics_a['f1'],
-            'Endo_Precision': metrics_a['precision'],
-            'Endo_Recall': metrics_a['recall'],
-            'Endo_AUC': metrics_a['auc'],
+            'Exo_F1': metrics_exo['f1'],
+            'Exo_Precision': metrics_exo['precision'],
+            'Exo_Recall': metrics_exo['recall'],
             
-            # Model B (Exogenous)
-            'Exo_F1': metrics_b['f1'],
-            'Exo_Precision': metrics_b['precision'],
-            'Exo_Recall': metrics_b['recall'],
-            'Exo_AUC': metrics_b['auc'],
-            
-            # Comparison
-            'F1_Lift': (metrics_b['f1'] - metrics_a['f1']) / metrics_a['f1'] if metrics_a['f1'] > 0 else 0,
-            'Exo_Better': metrics_b['f1'] > metrics_a['f1'],
-            
-            # Statistical Significance
+            'F1_Lift': lift,
+            'Exo_Better': metrics_exo['f1'] > metrics_endo['f1'],
             'DM_Stat': dm_stat,
             'P_Value': p_value,
-            'Significant': is_significant(p_value),
+            'Significant': is_significant(p_value) and lift > 0,  # Only positive significant
         }
         results.append(res)
         
-        # Live log significant improvements
-        if is_significant(p_value) and res['F1_Lift'] > 0:
-            print(f"  {ticker}: Lift={res['F1_Lift']*100:.1f}% "
-                  f"(Endo F1={metrics_a['f1']:.2f} -> Exo F1={metrics_b['f1']:.2f}) "
-                  f"[{len(keep_cols_a)}->{len(keep_cols_b)} features]")
+        if res['Significant']:
+            print(f"  ✓ {ticker}: Lift={lift*100:.1f}% (F1: {metrics_endo['f1']:.2f}→{metrics_exo['f1']:.2f})")
     
     # Save Results
     df_results = pd.DataFrame(results)
-    output_path = RESULTS_DIR / 'experiment_results.csv'
-    df_results.to_csv(output_path, index=False)
+    df_results.to_csv(RESULTS_DIR / 'experiment_results_v2.csv', index=False)
     
     # Save Feature Importance
     if feature_importance_all:
         df_importance = pd.concat(feature_importance_all)
-        df_importance.to_csv(RESULTS_DIR / 'feature_importance.csv', index=False)
+        df_importance.to_csv(RESULTS_DIR / 'feature_importance_v2.csv', index=False)
     
     # Summary
     print("\n" + "=" * 70)
-    print("EXPERIMENT SUMMARY")
+    print("EXPERIMENT SUMMARY (v2 FIXED)")
     print("=" * 70)
-    print(f"Total Tickers: {len(df_results)}")
-    print(f"Avg Endo Features: {df_results['Endo_Features'].mean():.0f}")
-    print(f"Avg Exo Features: {df_results['Exo_Features'].mean():.0f}")
     
-    sig_better = df_results[(df_results['Significant']) & (df_results['Exo_Better'])]
-    print(f"\nExogenous Significantly Better: {len(sig_better)} ({100*len(sig_better)/len(df_results):.1f}%)")
+    print(f"\nQuality Gates Applied:")
+    print(f"  Skipped (insufficient samples): {len(skipped['insufficient_samples'])}")
+    print(f"  Skipped (low baseline F1<{MIN_F1_THRESHOLD}): {len(skipped['low_baseline'])}")
     
-    mean_lift = df_results['F1_Lift'].mean() * 100
-    print(f"Mean F1 Lift: {mean_lift:+.2f}%")
-    
-    print("\nTop 5 Improvements (Exogenous vs Endogenous):")
-    top5 = df_results.nlargest(5, 'F1_Lift')[['Ticker', 'Endo_F1', 'Exo_F1', 'F1_Lift', 'Significant']]
-    print(top5.to_string(index=False))
+    if len(df_results) > 0:
+        print(f"\nAnalyzed Tickers: {len(df_results)}")
+        print(f"Avg Endo Features: {df_results['Endo_Features'].mean():.0f}")
+        print(f"Avg Exo Features: {df_results['Exo_Features'].mean():.0f}")
+        
+        sig_better = df_results[df_results['Significant']]
+        print(f"\n✓ Exogenous Significantly Better: {len(sig_better)} ({100*len(sig_better)/len(df_results):.1f}%)")
+        
+        exo_better = df_results[df_results['Exo_Better']]
+        print(f"  Exogenous Better (any): {len(exo_better)} ({100*len(exo_better)/len(df_results):.1f}%)")
+        
+        mean_lift = df_results['F1_Lift'].mean() * 100
+        print(f"  Mean F1 Lift: {mean_lift:+.2f}%")
+        
+        print("\nTop 5 Improvements:")
+        top5 = df_results.nlargest(5, 'F1_Lift')[['Ticker', 'Endo_F1', 'Exo_F1', 'F1_Lift', 'Significant']]
+        print(top5.to_string(index=False))
+    else:
+        print("No results - all tickers filtered out")
     
     return df_results
 
