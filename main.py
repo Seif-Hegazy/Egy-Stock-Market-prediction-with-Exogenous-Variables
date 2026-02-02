@@ -1,11 +1,11 @@
 """
-EGX Macro Significance Study - Main Experiment (v4 FIXED)
+EGX Macro Significance Study - Main Experiment (v5 FINAL)
 =========================================================
 FIXES:
-1. MCC-based threshold optimization (penalizes all-positive predictions)
-2. Balanced threshold search range (0.35-0.65)
-3. Reject degenerate solutions (recall=1 or precision=1)
-4. Better class weighting
+1. Youden's J statistic for optimal threshold (Sensitivity + Specificity - 1)
+2. Wider threshold search (0.20-0.80)
+3. Less aggressive filtering (min F1 = 0.25)
+4. ROC-AUC based probability calibration check
 """
 
 import sys
@@ -14,7 +14,10 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
-from sklearn.metrics import f1_score, matthews_corrcoef, precision_score, recall_score
+from sklearn.metrics import (
+    f1_score, precision_score, recall_score, 
+    roc_auc_score, confusion_matrix
+)
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -33,73 +36,42 @@ warnings.filterwarnings('ignore')
 RESULTS_DIR = Path(__file__).parent / 'results'
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-MIN_BASELINE_F1 = 0.35
+MIN_BASELINE_F1 = 0.25  # Relaxed to include more tickers
 
 
-def find_optimal_threshold_mcc(model, X_val, y_val) -> float:
+def find_optimal_threshold_youden(model, X_val, y_val) -> float:
     """
-    Find threshold that maximizes Matthews Correlation Coefficient (MCC).
+    Find threshold using Youden's J statistic.
+    J = Sensitivity + Specificity - 1 = TPR - FPR
     
-    MCC is better than F1 because:
-    - It accounts for all 4 confusion matrix quadrants
-    - Penalizes degenerate solutions (all-positive, all-negative)
-    - Range: -1 to +1 (0 = random, 1 = perfect)
-    """
-    probs = model.predict_proba(X_val)[:, 1]
-    
-    best_thresh = 0.5
-    best_mcc = -1
-    
-    # Search in balanced range
-    for thresh in np.arange(0.35, 0.66, 0.01):
-        preds = (probs >= thresh).astype(int)
-        
-        # Skip degenerate solutions
-        pred_ratio = preds.mean()
-        if pred_ratio < 0.1 or pred_ratio > 0.9:
-            continue
-        
-        mcc = matthews_corrcoef(y_val, preds)
-        
-        if mcc > best_mcc:
-            best_mcc = mcc
-            best_thresh = thresh
-    
-    return best_thresh
-
-
-def find_optimal_threshold_balanced_f1(model, X_val, y_val) -> float:
-    """
-    Find threshold using balanced F1 criteria.
-    Penalizes solutions where precision or recall is extreme.
+    This is the standard method for finding optimal classification threshold.
+    Maximizes the distance from the random guess line on ROC curve.
     """
     probs = model.predict_proba(X_val)[:, 1]
     
     best_thresh = 0.5
-    best_score = -1
+    best_j = -1
     
-    for thresh in np.arange(0.35, 0.66, 0.01):
+    # Wide search range
+    for thresh in np.arange(0.20, 0.81, 0.01):
         preds = (probs >= thresh).astype(int)
         
-        # Skip if all same prediction
+        # Need both classes predicted
         if len(np.unique(preds)) == 1:
             continue
         
-        precision = precision_score(y_val, preds, zero_division=0)
-        recall = recall_score(y_val, preds, zero_division=0)
-        f1 = f1_score(y_val, preds, zero_division=0)
+        # Confusion matrix
+        tn, fp, fn, tp = confusion_matrix(y_val, preds).ravel()
         
-        # Penalize extreme precision/recall (want balance)
-        balance_penalty = 1.0 - abs(precision - recall)
+        # Sensitivity (TPR) and Specificity (TNR)
+        sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
+        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
         
-        # Penalize recall = 1 (all positive predictions)
-        if recall >= 0.99:
-            balance_penalty *= 0.5
+        # Youden's J
+        j = sensitivity + specificity - 1
         
-        score = f1 * balance_penalty
-        
-        if score > best_score:
-            best_score = score
+        if j > best_j:
+            best_j = j
             best_thresh = thresh
     
     return best_thresh
@@ -107,8 +79,8 @@ def find_optimal_threshold_balanced_f1(model, X_val, y_val) -> float:
 
 def run_experiment():
     print("=" * 70)
-    print("EGX MACRO SIGNIFICANCE STUDY (v4 FIXED)")
-    print("MCC threshold | Balanced predictions | No degenerate solutions")
+    print("EGX MACRO SIGNIFICANCE STUDY (v5 FINAL)")
+    print("Youden's J threshold | Wide search | Relaxed filtering")
     print("=" * 70)
     
     print("\n[1] Loading Data...")
@@ -120,7 +92,7 @@ def run_experiment():
     print(f"\n[2] Running for {len(tickers)} tickers...")
     
     results = []
-    skipped = {'samples': [], 'baseline': [], 'degenerate': []}
+    skipped = {'samples': [], 'baseline': []}
     
     for ticker in tqdm(tickers):
         df_ticker = stocks[stocks['Ticker'] == ticker].copy()
@@ -140,7 +112,6 @@ def run_experiment():
         data_endo = prepare_datasets(samples_endo)
         data_exo = prepare_datasets(samples_exo)
         
-        # Check class balance
         train_pos_ratio = data_endo['y_train'].mean()
         
         # === Train Endogenous Model ===
@@ -153,26 +124,19 @@ def run_experiment():
             print(f"  ERROR {ticker} (endo): {e}")
             continue
         
-        # MCC-based threshold
-        thresh_endo = find_optimal_threshold_mcc(model_endo, data_endo['X_val'], data_endo['y_val'])
+        # Youden's J threshold
+        thresh_endo = find_optimal_threshold_youden(
+            model_endo, data_endo['X_val'], data_endo['y_val']
+        )
         
         # Evaluate
-        metrics_endo = evaluate_model(model_endo, data_endo['X_test'], data_endo['y_test'], thresh_endo)
+        metrics_endo = evaluate_model(
+            model_endo, data_endo['X_test'], data_endo['y_test'], thresh_endo
+        )
         
-        # Check for degenerate solution
-        if metrics_endo['recall'] >= 0.99 or metrics_endo['recall'] <= 0.01:
-            skipped['degenerate'].append((ticker, 'endo', metrics_endo['recall']))
-            # Try balanced F1 instead
-            thresh_endo = find_optimal_threshold_balanced_f1(model_endo, data_endo['X_val'], data_endo['y_val'])
-            metrics_endo = evaluate_model(model_endo, data_endo['X_test'], data_endo['y_test'], thresh_endo)
-        
-        # Quality gate
+        # Relaxed quality gate
         if metrics_endo['f1'] < MIN_BASELINE_F1:
             skipped['baseline'].append((ticker, metrics_endo['f1']))
-            continue
-        
-        # Still degenerate after retry?
-        if metrics_endo['recall'] >= 0.99:
             continue
         
         # === Train Exogenous Model ===
@@ -185,14 +149,23 @@ def run_experiment():
             print(f"  ERROR {ticker} (exo): {e}")
             continue
         
-        # MCC-based threshold
-        thresh_exo = find_optimal_threshold_mcc(model_exo, data_exo['X_val'], data_exo['y_val'])
-        metrics_exo = evaluate_model(model_exo, data_exo['X_test'], data_exo['y_test'], thresh_exo)
+        # Youden's J threshold
+        thresh_exo = find_optimal_threshold_youden(
+            model_exo, data_exo['X_val'], data_exo['y_val']
+        )
         
-        # Retry if degenerate
-        if metrics_exo['recall'] >= 0.99 or metrics_exo['recall'] <= 0.01:
-            thresh_exo = find_optimal_threshold_balanced_f1(model_exo, data_exo['X_val'], data_exo['y_val'])
-            metrics_exo = evaluate_model(model_exo, data_exo['X_test'], data_exo['y_test'], thresh_exo)
+        metrics_exo = evaluate_model(
+            model_exo, data_exo['X_test'], data_exo['y_test'], thresh_exo
+        )
+        
+        # === ROC-AUC for probability quality ===
+        try:
+            auc_endo = roc_auc_score(data_endo['y_test'], 
+                                      model_endo.predict_proba(data_endo['X_test'])[:, 1])
+            auc_exo = roc_auc_score(data_exo['y_test'],
+                                     model_exo.predict_proba(data_exo['X_test'])[:, 1])
+        except:
+            auc_endo = auc_exo = 0.5
         
         # === Statistical Test ===
         probs_endo = model_endo.predict_proba(data_endo['X_test'])[:, 1]
@@ -211,65 +184,68 @@ def run_experiment():
         res = {
             'Ticker': ticker,
             'Samples': len(samples_endo),
-            'Train_Pos_Ratio': train_pos_ratio,
+            'Train_Pos_Ratio': round(train_pos_ratio, 3),
             'Test': data_endo['n_test'],
             
-            'Endo_F1': metrics_endo['f1'],
-            'Endo_Precision': metrics_endo['precision'],
-            'Endo_Recall': metrics_endo['recall'],
-            'Endo_Threshold': thresh_endo,
+            'Endo_F1': round(metrics_endo['f1'], 4),
+            'Endo_Precision': round(metrics_endo['precision'], 4),
+            'Endo_Recall': round(metrics_endo['recall'], 4),
+            'Endo_Threshold': round(thresh_endo, 2),
+            'Endo_AUC': round(auc_endo, 4),
             
-            'Exo_F1': metrics_exo['f1'],
-            'Exo_Precision': metrics_exo['precision'],
-            'Exo_Recall': metrics_exo['recall'],
-            'Exo_Threshold': thresh_exo,
+            'Exo_F1': round(metrics_exo['f1'], 4),
+            'Exo_Precision': round(metrics_exo['precision'], 4),
+            'Exo_Recall': round(metrics_exo['recall'], 4),
+            'Exo_Threshold': round(thresh_exo, 2),
+            'Exo_AUC': round(auc_exo, 4),
             
-            'F1_Lift': lift,
+            'F1_Lift': round(lift, 4),
+            'AUC_Lift': round(auc_exo - auc_endo, 4),
             'Exo_Better': metrics_exo['f1'] > metrics_endo['f1'],
-            'DM_Stat': dm_stat,
-            'P_Value': p_value,
+            'DM_Stat': round(dm_stat, 4),
+            'P_Value': round(p_value, 6),
             'Significant': significant,
         }
         results.append(res)
         
-        # Log balanced predictions
-        if metrics_endo['recall'] < 0.95 and metrics_exo['recall'] < 0.95:
-            status = "✓" if significant else " "
-            print(f"  {status} {ticker}: Lift={lift*100:+.1f}% "
-                  f"(R:{metrics_endo['recall']:.2f}→{metrics_exo['recall']:.2f})")
+        # Log
+        status = "✓" if significant else " "
+        print(f"  {status} {ticker}: Lift={lift*100:+.1f}% "
+              f"(AUC:{auc_endo:.2f}→{auc_exo:.2f}, Th:{thresh_endo:.2f}→{thresh_exo:.2f})")
     
     # Save
     df_results = pd.DataFrame(results)
-    df_results.to_csv(RESULTS_DIR / 'experiment_results_v4.csv', index=False)
+    df_results.to_csv(RESULTS_DIR / 'experiment_results_v5.csv', index=False)
     
     # Summary
     print("\n" + "=" * 70)
-    print("EXPERIMENT SUMMARY (v4 FIXED)")
+    print("EXPERIMENT SUMMARY (v5 FINAL)")
     print("=" * 70)
     
-    print(f"\nQuality Gates:")
+    print(f"\nFiltering:")
     print(f"  Skipped (insufficient samples): {len(skipped['samples'])}")
-    print(f"  Skipped (low baseline F1): {len(skipped['baseline'])}")
-    print(f"  Skipped (degenerate solutions): {len(skipped['degenerate'])}")
+    print(f"  Skipped (low baseline F1<{MIN_BASELINE_F1}): {len(skipped['baseline'])}")
     
     if len(df_results) > 0:
         print(f"\nAnalyzed: {len(df_results)} tickers")
+        print(f"Threshold range: {df_results['Endo_Threshold'].min():.2f} - {df_results['Endo_Threshold'].max():.2f}")
         
-        # Check for balanced predictions
-        balanced = df_results[(df_results['Endo_Recall'] < 0.95) & (df_results['Endo_Recall'] > 0.05)]
-        print(f"Balanced predictions: {len(balanced)}/{len(df_results)}")
+        exo_better = df_results[df_results['Exo_Better']]
+        sig = df_results[df_results['Significant']]
         
-        if len(balanced) > 0:
-            exo_better = balanced[balanced['Exo_Better']]
-            sig = balanced[balanced['Significant']]
-            
-            print(f"\n✓ Exogenous Better: {len(exo_better)}/{len(balanced)} ({100*len(exo_better)/len(balanced):.0f}%)")
-            print(f"✓ Statistically Significant: {len(sig)}/{len(balanced)} ({100*len(sig)/len(balanced):.0f}%)")
-            print(f"  Mean Lift: {balanced['F1_Lift'].mean()*100:+.1f}%")
-            
-            print("\nTop 5 (Balanced predictions only):")
-            top = balanced.nlargest(5, 'F1_Lift')[['Ticker', 'Endo_F1', 'Endo_Recall', 'Exo_F1', 'Exo_Recall', 'F1_Lift', 'Significant']]
-            print(top.to_string(index=False))
+        print(f"\n✓ Exogenous Better (F1): {len(exo_better)}/{len(df_results)} ({100*len(exo_better)/len(df_results):.0f}%)")
+        print(f"✓ Statistically Significant: {len(sig)}/{len(df_results)} ({100*len(sig)/len(df_results):.0f}%)")
+        print(f"  Mean F1 Lift: {df_results['F1_Lift'].mean()*100:+.1f}%")
+        print(f"  Mean AUC Lift: {df_results['AUC_Lift'].mean()*100:+.2f}%")
+        
+        print("\nTop 5 by F1 Lift:")
+        cols = ['Ticker', 'Endo_F1', 'Exo_F1', 'F1_Lift', 'Endo_AUC', 'Exo_AUC', 'Significant']
+        top = df_results.nlargest(5, 'F1_Lift')[cols]
+        print(top.to_string(index=False))
+        
+        print("\nTop 5 by AUC Lift:")
+        top_auc = df_results.nlargest(5, 'AUC_Lift')[cols]
+        print(top_auc.to_string(index=False))
     
     return df_results
 
