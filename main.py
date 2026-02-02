@@ -1,12 +1,8 @@
-#!/usr/bin/env python3
 """
-EGX Prediction Model v3 - Main Runner (Research Exact)
-Implements strictly controlled experiment:
-- 5-day rolling window concatenation
-- Neutral zone filtering
-- Chronological split
-- Threshold optimization
-- Comparison: Endogenous Only vs. Endogenous + Exogenous
+EGX Macro Significance Study - Main Experiment Runner
+======================================================
+Compares Endogenous-only model vs Exogenous-enhanced model
+using identical feature engineering, windowing, and thresholding.
 """
 
 import sys
@@ -20,7 +16,12 @@ from tqdm import tqdm
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.data_loader import load_raw_data, construct_rolling_windows, prepare_datasets
+from src.data_loader import (
+    load_raw_data, 
+    create_endogenous_samples, 
+    create_exogenous_samples,
+    prepare_datasets
+)
 from src.models import train_model, get_percentile_threshold, evaluate_model
 from src.validation import diebold_mariano_test, compute_squared_loss, is_significant
 
@@ -32,8 +33,8 @@ RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 def run_experiment():
     print("=" * 70)
-    print("EGX PREDICTION MODEL - MACRO SIGNIFICANCE STUDY")
-    print("Model: HistGradientBoosting (LightGBM) | 5-day Rolling Window | Q0.40")
+    print("EGX MACRO SIGNIFICANCE STUDY")
+    print("Endogenous (Technical) vs Exogenous (Technical + Macro)")
     print("=" * 70)
     
     # 1. Load Data
@@ -42,122 +43,111 @@ def run_experiment():
     print(f"  Stocks: {len(stocks):,} rows")
     print(f"  Macro:  {len(macro):,} rows")
     
+    # Get unique tickers
     tickers = stocks['Ticker'].unique()
-    results = []
-    
     print(f"\n[2] Running Experiment for {len(tickers)} tickers...")
     
+    results = []
+    
     for ticker in tqdm(tickers):
-        # Prepare data for this ticker
         df_ticker = stocks[stocks['Ticker'] == ticker].copy()
         
-        # Construct rolling windows (Week 0 + Week 1 -> Week 2)
-        samples = construct_rolling_windows(df_ticker, macro, w=5, margin=0.001)
+        # Skip tickers with insufficient data
+        if len(df_ticker) < 500:
+            continue
         
-        if len(samples) < 100:  # Minimum samples check
+        # --- Pipeline A: Endogenous Only (Technical) ---
+        samples_a = create_endogenous_samples(df_ticker, macro)
+        if len(samples_a) < 100:
             continue
             
-        # Split and Scale
-        data = prepare_datasets(samples)
+        data_a = prepare_datasets(samples_a)
         
-        # --- Define Feature Sets ---
-        all_cols = data['X_train'].columns.tolist()
+        # --- Pipeline B: Exogenous (Technical + Macro) ---
+        samples_b = create_exogenous_samples(df_ticker, macro)
+        data_b = prepare_datasets(samples_b)
         
-        # Model A: Endogenous Only (Price + Technical features)
-        # Columns that start with 'price_' or 'tech_'
-        feat_endo = [c for c in all_cols if c.startswith('price_') or c.startswith('tech_')]
+        # Train Models
+        model_a = train_model(data_a['X_train'], data_a['y_train'],
+                              data_a['X_val'], data_a['y_val'])
+        model_b = train_model(data_b['X_train'], data_b['y_train'],
+                              data_b['X_val'], data_b['y_val'])
         
-        # Model B: Endogenous + Exogenous (All features)
-        feat_all = all_cols  # Price + Macro columns
+        # Get thresholds (fixed percentile)
+        thresh_a = get_percentile_threshold(model_a, data_a['X_val'], quantile=0.40)
+        thresh_b = get_percentile_threshold(model_b, data_b['X_val'], quantile=0.40)
         
-        # check if we actually have macro features
-        if len(feat_endo) == len(feat_all):
-            print(f"  Warning: No macro features found for {ticker}")
-            continue
-            
-        # --- Train Model A (Endogenous) ---
-        model_a = train_model(
-            data['X_train'][feat_endo], data['y_train'],
-            data['X_val'][feat_endo], data['y_val']
-        )
+        # Evaluate on Test Set
+        y_true = data_a['y_test']  # Same for both (same samples, different features)
         
-        # Threshold A (Q0.40)
-        thresh_a = get_percentile_threshold(model_a, data['X_val'][feat_endo], quantile=0.40)
+        metrics_a = evaluate_model(model_a, data_a['X_test'], y_true, thresh_a)
+        metrics_b = evaluate_model(model_b, data_b['X_test'], y_true, thresh_b)
         
-        # Evaluate A
-        metrics_a = evaluate_model(model_a, data['X_test'][feat_endo], data['y_test'], thresh_a)
+        # Statistical Test (Diebold-Mariano)
+        probs_a = model_a.predict_proba(data_a['X_test'])[:, 1]
+        probs_b = model_b.predict_proba(data_b['X_test'])[:, 1]
         
-        # --- Train Model B (Enhanced) ---
-        model_b = train_model(
-            data['X_train'][feat_all], data['y_train'],
-            data['X_val'][feat_all], data['y_val']
-        )
+        loss_a = compute_squared_loss(y_true.values, probs_a)
+        loss_b = compute_squared_loss(y_true.values, probs_b)
         
-        # Threshold B (Q0.40)
-        thresh_b = get_percentile_threshold(model_b, data['X_val'][feat_all], quantile=0.40)
-        
-        # Evaluate B
-        metrics_b = evaluate_model(model_b, data['X_test'][feat_all], data['y_test'], thresh_b)
-        
-        # --- Statistical Significance (DM Test) ---
-        probs_a = model_a.predict_proba(data['X_test'][feat_endo])[:, 1]
-        probs_b = model_b.predict_proba(data['X_test'][feat_all])[:, 1]
-        y_true = data['y_test'].values
-        
-        loss_a = compute_squared_loss(y_true, probs_a)
-        loss_b = compute_squared_loss(y_true, probs_b)
         dm_stat, p_value = diebold_mariano_test(loss_a, loss_b)
         
-        # --- Store Results ---
+        # Store Results
         res = {
             'Ticker': ticker,
-            'Samples': len(samples),
+            'Samples': len(samples_a),
             'Test_Size': len(y_true),
-            'Model_A_F1': metrics_a['f1'],
-            'Model_B_F1': metrics_b['f1'],
-            'Model_A_Precision': metrics_a['precision'],
-            'Model_B_Precision': metrics_b['precision'],
-            'Model_A_Recall': metrics_a['recall'],
-            'Model_B_Recall': metrics_b['recall'],
+            
+            # Model A (Endogenous)
+            'Endo_F1': metrics_a['f1'],
+            'Endo_Precision': metrics_a['precision'],
+            'Endo_Recall': metrics_a['recall'],
+            'Endo_AUC': metrics_a['auc'],
+            
+            # Model B (Exogenous)
+            'Exo_F1': metrics_b['f1'],
+            'Exo_Precision': metrics_b['precision'],
+            'Exo_Recall': metrics_b['recall'],
+            'Exo_AUC': metrics_b['auc'],
+            
+            # Comparison
             'F1_Lift': (metrics_b['f1'] - metrics_a['f1']) / metrics_a['f1'] if metrics_a['f1'] > 0 else 0,
-            'Model_A_AUC': metrics_a['auc'],
-            'Model_B_AUC': metrics_b['auc'],
+            'Exo_Better': metrics_b['f1'] > metrics_a['f1'],
+            
+            # Statistical Significance
             'DM_Stat': dm_stat,
             'P_Value': p_value,
             'Significant': is_significant(p_value),
-            'Thresh_A': thresh_a,
-            'Thresh_B': thresh_b
         }
         results.append(res)
         
-        # Live log significant results
+        # Live log significant improvements
         if is_significant(p_value) and res['F1_Lift'] > 0:
-            print(f"  {ticker}: Lift={res['F1_Lift']:.1%} (P: {res['Model_A_Precision']:.2f}->{res['Model_B_Precision']:.2f}, R: {res['Model_A_Recall']:.2f}->{res['Model_B_Recall']:.2f})")
-            
+            print(f"  {ticker}: Lift={res['F1_Lift']*100:.1f}% "
+                  f"(Endo F1={metrics_a['f1']:.2f} -> Exo F1={metrics_b['f1']:.2f})")
+    
     # Save Results
     df_results = pd.DataFrame(results)
-    df_results.to_csv(RESULTS_DIR / 'v3_results.csv', index=False)
+    output_path = RESULTS_DIR / 'experiment_results.csv'
+    df_results.to_csv(output_path, index=False)
     
     # Summary
     print("\n" + "=" * 70)
-    print("V3 EXPERIMENT SUMMARY")
+    print("EXPERIMENT SUMMARY")
     print("=" * 70)
+    print(f"Total Tickers: {len(df_results)}")
     
-    if len(df_results) > 0:
-        sig_count = df_results['Significant'].sum()
-        pos_lift = (df_results['F1_Lift'] > 0).sum()
-        
-        print(f"Total Tickers: {len(df_results)}")
-        print(f"Significant Differences: {sig_count} ({sig_count/len(df_results):.1%})")
-        print(f"Positive Lift: {pos_lift} ({pos_lift/len(df_results):.1%})")
-        print(f"Mean F1 Lift: {df_results['F1_Lift'].mean():.1%}")
-        
-        print("\nTop 5 Improvers:")
-        print(df_results.sort_values('F1_Lift', ascending=False).head(5)[
-            ['Ticker', 'Model_A_F1', 'Model_B_F1', 'F1_Lift', 'Significant']
-        ])
-    else:
-        print("No results generated.")
+    sig_better = df_results[(df_results['Significant']) & (df_results['Exo_Better'])]
+    print(f"Exogenous Significantly Better: {len(sig_better)} ({100*len(sig_better)/len(df_results):.1f}%)")
+    
+    mean_lift = df_results['F1_Lift'].mean() * 100
+    print(f"Mean F1 Lift: {mean_lift:+.2f}%")
+    
+    print("\nTop 5 Improvements (Exogenous vs Endogenous):")
+    top5 = df_results.nlargest(5, 'F1_Lift')[['Ticker', 'Endo_F1', 'Exo_F1', 'F1_Lift', 'Significant']]
+    print(top5.to_string(index=False))
+    
+    return df_results
 
 
 if __name__ == '__main__':

@@ -93,9 +93,9 @@ def train_hgb(X_train: pd.DataFrame, y_train: pd.Series,
 
 # Alias for easy switching in main.py
 # Change this to switch models
-# train_model = train_catboost  
+train_model = train_catboost  # Best performer
 # train_model = train_random_forest
-train_model = train_hgb
+# train_model = train_hgb
 
 
 def get_percentile_threshold(model: Any, X_val: pd.DataFrame, quantile: float = 0.40) -> float:
