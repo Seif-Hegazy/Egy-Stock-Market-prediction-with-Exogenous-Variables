@@ -1,11 +1,11 @@
 """
-EGX Macro Significance Study - Main Experiment (v3 FINAL)
+EGX Macro Significance Study - Main Experiment (v4 FIXED)
 =========================================================
 FIXES:
-1. Optimal threshold search (maximize F1 on validation)
-2. Global correlation filtering
-3. Proper statistical testing
-4. Quality gates
+1. MCC-based threshold optimization (penalizes all-positive predictions)
+2. Balanced threshold search range (0.35-0.65)
+3. Reject degenerate solutions (recall=1 or precision=1)
+4. Better class weighting
 """
 
 import sys
@@ -14,7 +14,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, matthews_corrcoef, precision_score, recall_score
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -33,25 +33,73 @@ warnings.filterwarnings('ignore')
 RESULTS_DIR = Path(__file__).parent / 'results'
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Configuration
 MIN_BASELINE_F1 = 0.35
 
 
-def find_optimal_threshold(model, X_val, y_val) -> float:
+def find_optimal_threshold_mcc(model, X_val, y_val) -> float:
     """
-    Find threshold that maximizes F1 on validation set.
-    This is better than fixed percentile because it adapts to each model.
+    Find threshold that maximizes Matthews Correlation Coefficient (MCC).
+    
+    MCC is better than F1 because:
+    - It accounts for all 4 confusion matrix quadrants
+    - Penalizes degenerate solutions (all-positive, all-negative)
+    - Range: -1 to +1 (0 = random, 1 = perfect)
     """
     probs = model.predict_proba(X_val)[:, 1]
     
     best_thresh = 0.5
-    best_f1 = 0
+    best_mcc = -1
     
-    for thresh in np.arange(0.3, 0.7, 0.02):
+    # Search in balanced range
+    for thresh in np.arange(0.35, 0.66, 0.01):
         preds = (probs >= thresh).astype(int)
+        
+        # Skip degenerate solutions
+        pred_ratio = preds.mean()
+        if pred_ratio < 0.1 or pred_ratio > 0.9:
+            continue
+        
+        mcc = matthews_corrcoef(y_val, preds)
+        
+        if mcc > best_mcc:
+            best_mcc = mcc
+            best_thresh = thresh
+    
+    return best_thresh
+
+
+def find_optimal_threshold_balanced_f1(model, X_val, y_val) -> float:
+    """
+    Find threshold using balanced F1 criteria.
+    Penalizes solutions where precision or recall is extreme.
+    """
+    probs = model.predict_proba(X_val)[:, 1]
+    
+    best_thresh = 0.5
+    best_score = -1
+    
+    for thresh in np.arange(0.35, 0.66, 0.01):
+        preds = (probs >= thresh).astype(int)
+        
+        # Skip if all same prediction
+        if len(np.unique(preds)) == 1:
+            continue
+        
+        precision = precision_score(y_val, preds, zero_division=0)
+        recall = recall_score(y_val, preds, zero_division=0)
         f1 = f1_score(y_val, preds, zero_division=0)
-        if f1 > best_f1:
-            best_f1 = f1
+        
+        # Penalize extreme precision/recall (want balance)
+        balance_penalty = 1.0 - abs(precision - recall)
+        
+        # Penalize recall = 1 (all positive predictions)
+        if recall >= 0.99:
+            balance_penalty *= 0.5
+        
+        score = f1 * balance_penalty
+        
+        if score > best_score:
+            best_score = score
             best_thresh = thresh
     
     return best_thresh
@@ -59,11 +107,10 @@ def find_optimal_threshold(model, X_val, y_val) -> float:
 
 def run_experiment():
     print("=" * 70)
-    print("EGX MACRO SIGNIFICANCE STUDY (v3 FINAL)")
-    print("Semi-overlapping | Fixed features | Optimal threshold | No leakage")
+    print("EGX MACRO SIGNIFICANCE STUDY (v4 FIXED)")
+    print("MCC threshold | Balanced predictions | No degenerate solutions")
     print("=" * 70)
     
-    # Load data
     print("\n[1] Loading Data...")
     stocks, macro = load_raw_data()
     print(f"  Stocks: {len(stocks):,} rows")
@@ -73,7 +120,7 @@ def run_experiment():
     print(f"\n[2] Running for {len(tickers)} tickers...")
     
     results = []
-    skipped = {'samples': [], 'baseline': []}
+    skipped = {'samples': [], 'baseline': [], 'degenerate': []}
     
     for ticker in tqdm(tickers):
         df_ticker = stocks[stocks['Ticker'] == ticker].copy()
@@ -81,18 +128,20 @@ def run_experiment():
         if len(df_ticker) < 500:
             continue
         
-        # === Create BOTH pipelines ===
+        # Create pipelines
         samples_endo = create_endogenous_samples(df_ticker, macro)
         samples_exo = create_exogenous_samples(df_ticker, macro)
         
-        # Quality gate: minimum samples
         if len(samples_endo) < MIN_SAMPLES:
             skipped['samples'].append(ticker)
             continue
         
-        # === Prepare datasets (identical split for both) ===
+        # Prepare datasets
         data_endo = prepare_datasets(samples_endo)
         data_exo = prepare_datasets(samples_exo)
+        
+        # Check class balance
+        train_pos_ratio = data_endo['y_train'].mean()
         
         # === Train Endogenous Model ===
         try:
@@ -104,15 +153,26 @@ def run_experiment():
             print(f"  ERROR {ticker} (endo): {e}")
             continue
         
-        # Optimal threshold for endo
-        thresh_endo = find_optimal_threshold(model_endo, data_endo['X_val'], data_endo['y_val'])
+        # MCC-based threshold
+        thresh_endo = find_optimal_threshold_mcc(model_endo, data_endo['X_val'], data_endo['y_val'])
         
-        # Evaluate endo
+        # Evaluate
         metrics_endo = evaluate_model(model_endo, data_endo['X_test'], data_endo['y_test'], thresh_endo)
         
-        # Quality gate: minimum baseline F1
+        # Check for degenerate solution
+        if metrics_endo['recall'] >= 0.99 or metrics_endo['recall'] <= 0.01:
+            skipped['degenerate'].append((ticker, 'endo', metrics_endo['recall']))
+            # Try balanced F1 instead
+            thresh_endo = find_optimal_threshold_balanced_f1(model_endo, data_endo['X_val'], data_endo['y_val'])
+            metrics_endo = evaluate_model(model_endo, data_endo['X_test'], data_endo['y_test'], thresh_endo)
+        
+        # Quality gate
         if metrics_endo['f1'] < MIN_BASELINE_F1:
             skipped['baseline'].append((ticker, metrics_endo['f1']))
+            continue
+        
+        # Still degenerate after retry?
+        if metrics_endo['recall'] >= 0.99:
             continue
         
         # === Train Exogenous Model ===
@@ -125,11 +185,14 @@ def run_experiment():
             print(f"  ERROR {ticker} (exo): {e}")
             continue
         
-        # Optimal threshold for exo
-        thresh_exo = find_optimal_threshold(model_exo, data_exo['X_val'], data_exo['y_val'])
-        
-        # Evaluate exo
+        # MCC-based threshold
+        thresh_exo = find_optimal_threshold_mcc(model_exo, data_exo['X_val'], data_exo['y_val'])
         metrics_exo = evaluate_model(model_exo, data_exo['X_test'], data_exo['y_test'], thresh_exo)
+        
+        # Retry if degenerate
+        if metrics_exo['recall'] >= 0.99 or metrics_exo['recall'] <= 0.01:
+            thresh_exo = find_optimal_threshold_balanced_f1(model_exo, data_exo['X_val'], data_exo['y_val'])
+            metrics_exo = evaluate_model(model_exo, data_exo['X_test'], data_exo['y_test'], thresh_exo)
         
         # === Statistical Test ===
         probs_endo = model_endo.predict_proba(data_endo['X_test'])[:, 1]
@@ -143,18 +206,13 @@ def run_experiment():
         # Compute lift
         lift = (metrics_exo['f1'] - metrics_endo['f1']) / metrics_endo['f1'] if metrics_endo['f1'] > 0 else 0
         
-        # Significant only if POSITIVE lift and p < 0.05
         significant = is_significant(p_value) and lift > 0
         
         res = {
             'Ticker': ticker,
             'Samples': len(samples_endo),
-            'Train': data_endo['n_train'],
-            'Val': data_endo['n_val'],
+            'Train_Pos_Ratio': train_pos_ratio,
             'Test': data_endo['n_test'],
-            
-            'Endo_Features': len(data_endo['feature_names']),
-            'Exo_Features': len(data_exo['feature_names']),
             
             'Endo_F1': metrics_endo['f1'],
             'Endo_Precision': metrics_endo['precision'],
@@ -174,36 +232,44 @@ def run_experiment():
         }
         results.append(res)
         
-        if significant:
-            print(f"  ✓ {ticker}: +{lift*100:.1f}% (F1: {metrics_endo['f1']:.2f}→{metrics_exo['f1']:.2f})")
+        # Log balanced predictions
+        if metrics_endo['recall'] < 0.95 and metrics_exo['recall'] < 0.95:
+            status = "✓" if significant else " "
+            print(f"  {status} {ticker}: Lift={lift*100:+.1f}% "
+                  f"(R:{metrics_endo['recall']:.2f}→{metrics_exo['recall']:.2f})")
     
     # Save
     df_results = pd.DataFrame(results)
-    df_results.to_csv(RESULTS_DIR / 'experiment_results_v3.csv', index=False)
+    df_results.to_csv(RESULTS_DIR / 'experiment_results_v4.csv', index=False)
     
     # Summary
     print("\n" + "=" * 70)
-    print("EXPERIMENT SUMMARY (v3 FINAL)")
+    print("EXPERIMENT SUMMARY (v4 FIXED)")
     print("=" * 70)
     
     print(f"\nQuality Gates:")
     print(f"  Skipped (insufficient samples): {len(skipped['samples'])}")
-    print(f"  Skipped (low baseline F1<{MIN_BASELINE_F1}): {len(skipped['baseline'])}")
+    print(f"  Skipped (low baseline F1): {len(skipped['baseline'])}")
+    print(f"  Skipped (degenerate solutions): {len(skipped['degenerate'])}")
     
     if len(df_results) > 0:
         print(f"\nAnalyzed: {len(df_results)} tickers")
-        print(f"Features: {df_results['Endo_Features'].iloc[0]} endo, {df_results['Exo_Features'].iloc[0]} exo")
         
-        exo_better = df_results[df_results['Exo_Better']]
-        sig = df_results[df_results['Significant']]
+        # Check for balanced predictions
+        balanced = df_results[(df_results['Endo_Recall'] < 0.95) & (df_results['Endo_Recall'] > 0.05)]
+        print(f"Balanced predictions: {len(balanced)}/{len(df_results)}")
         
-        print(f"\n✓ Exogenous Better: {len(exo_better)}/{len(df_results)} ({100*len(exo_better)/len(df_results):.0f}%)")
-        print(f"✓ Statistically Significant: {len(sig)}/{len(df_results)} ({100*len(sig)/len(df_results):.0f}%)")
-        print(f"  Mean Lift: {df_results['F1_Lift'].mean()*100:+.1f}%")
-        
-        print("\nTop 5 Improvements:")
-        top = df_results.nlargest(5, 'F1_Lift')[['Ticker', 'Endo_F1', 'Exo_F1', 'F1_Lift', 'P_Value', 'Significant']]
-        print(top.to_string(index=False))
+        if len(balanced) > 0:
+            exo_better = balanced[balanced['Exo_Better']]
+            sig = balanced[balanced['Significant']]
+            
+            print(f"\n✓ Exogenous Better: {len(exo_better)}/{len(balanced)} ({100*len(exo_better)/len(balanced):.0f}%)")
+            print(f"✓ Statistically Significant: {len(sig)}/{len(balanced)} ({100*len(sig)/len(balanced):.0f}%)")
+            print(f"  Mean Lift: {balanced['F1_Lift'].mean()*100:+.1f}%")
+            
+            print("\nTop 5 (Balanced predictions only):")
+            top = balanced.nlargest(5, 'F1_Lift')[['Ticker', 'Endo_F1', 'Endo_Recall', 'Exo_F1', 'Exo_Recall', 'F1_Lift', 'Significant']]
+            print(top.to_string(index=False))
     
     return df_results
 
