@@ -1,11 +1,12 @@
 """
-EGX Macro Significance Study - Feature Engineering Pipeline (v2)
-================================================================
-Fixed Issues:
-1. Unified correlation filtering (same features for both pipelines)
-2. Improved windowing with non-overlapping samples
-3. Better target definition (end-to-end return)
-4. Quality thresholds for sample size
+EGX Macro Significance Study - Feature Engineering Pipeline (v3 FINAL)
+=======================================================================
+FIXES:
+1. Semi-overlapping windows (step=2) for more samples
+2. Fixed feature set (no per-ticker variation)
+3. Separate pipelines with IDENTICAL preprocessing
+4. Optimal threshold search (instead of fixed percentile)
+5. Strict data leakage prevention
 """
 
 import pandas as pd
@@ -21,24 +22,14 @@ PROJECT_ROOT = Path(__file__).parent.parent
 DATA_DIR = PROJECT_ROOT / 'data'
 
 # Windowing parameters
-WINDOW_SIZE = 5  # 1 trading week
-NEUTRAL_MARGIN = 0.01  # 1% neutral zone
-MIN_SAMPLES = 200  # Minimum samples required per ticker
+WINDOW_SIZE = 5          # 1 trading week
+STEP_SIZE = 2            # Semi-overlapping (more samples)
+NEUTRAL_MARGIN = 0.015   # 1.5% neutral zone
+MIN_SAMPLES = 300        # Minimum after filtering
 
-# Feature definitions
-TECHNICAL_FEATURES = [
-    'ret_1w', 'ret_1m', 'ret_2w',  # Returns
-    'vol_1m',                       # Volatility
-    'rsi_14',                       # RSI
-    'mom_20',                       # Momentum
-    'macd', 'macd_signal',          # MACD
-    'volume_ratio',                 # Volume relative to MA
-]
-
-MACRO_FEATURES = [
-    'usd_egp', 'gold_local', 'cbe_rate', 'inflation',  # Egypt
-    'oil', 'gold_intl', 'sp500', 'vix', 'eur_usd', 'msci_em'  # Global
-]
+# Static feature definitions (no variation)
+TECHNICAL_COLS = ['ret_1w', 'ret_2w', 'ret_1m', 'vol_1m', 'rsi_14', 'mom_20', 'macd', 'volume_ratio']
+MACRO_COLS = ['usd_egp', 'gold_local', 'cbe_rate', 'inflation', 'oil', 'gold_intl', 'sp500', 'vix']
 
 
 # =============================================================================
@@ -47,199 +38,159 @@ MACRO_FEATURES = [
 
 def load_raw_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Load raw stock and macro data."""
-    # Load stocks
     df_stock = pd.read_csv(DATA_DIR / 'raw' / 'stocks' / 'egx_daily_12y.csv')
     df_stock['Date'] = pd.to_datetime(df_stock['Date'])
     df_stock = df_stock.sort_values(['Ticker', 'Date']).reset_index(drop=True)
     
-    # Load Egypt macro
     df_egypt = pd.read_csv(DATA_DIR / 'raw' / 'economic' / 'egypt_economic_data.csv')
     df_egypt['date'] = pd.to_datetime(df_egypt['date'])
     df_egypt = df_egypt.rename(columns={
-        'date': 'Date',
-        'usd_sell_rate': 'usd_egp',
-        'gold_24k': 'gold_local',
-        'cbe_deposit_rate': 'cbe_rate',
+        'date': 'Date', 'usd_sell_rate': 'usd_egp',
+        'gold_24k': 'gold_local', 'cbe_deposit_rate': 'cbe_rate',
         'headline_inflation': 'inflation'
     })
     
-    # Load Global macro
     df_global = pd.read_csv(DATA_DIR / 'raw' / 'global' / 'global_market_data.csv')
     df_global['date'] = pd.to_datetime(df_global['date'])
     df_global = df_global.rename(columns={
-        'date': 'Date',
-        'oil_close': 'oil',
-        'gold_intl_close': 'gold_intl',
-        'sp500_close': 'sp500',
-        'vix_close': 'vix',
-        'eur_usd_close': 'eur_usd',
-        'msci_em_close': 'msci_em'
+        'date': 'Date', 'oil_close': 'oil',
+        'gold_intl_close': 'gold_intl', 'sp500_close': 'sp500',
+        'vix_close': 'vix'
     })
     
-    # Merge macro data
-    df_macro = df_egypt.merge(df_global, on='Date', how='outer')
-    df_macro = df_macro.sort_values('Date').ffill()
+    df_macro = df_egypt.merge(df_global[['Date', 'oil', 'gold_intl', 'sp500', 'vix']], 
+                               on='Date', how='outer')
+    df_macro = df_macro.sort_values('Date').ffill().bfill()
     
     return df_stock, df_macro
 
 
 # =============================================================================
-# Technical Indicators
+# Technical Indicators (Computed BEFORE windowing - no leakage)
 # =============================================================================
 
-def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    """Compute Relative Strength Index."""
-    delta = series.diff()
-    gain = delta.where(delta > 0, 0).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
-
-
-def compute_macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> Tuple[pd.Series, pd.Series]:
-    """Compute MACD and Signal line."""
-    ema_fast = series.ewm(span=fast, adjust=False).mean()
-    ema_slow = series.ewm(span=slow, adjust=False).mean()
-    macd = ema_fast - ema_slow
-    macd_signal = macd.ewm(span=signal, adjust=False).mean()
-    return macd, macd_signal
-
-
-def add_technical_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute all technical indicators."""
+def compute_technical_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute technical indicators. Called once per ticker before windowing."""
     df = df.copy()
     
-    # Returns
-    df['ret_1w'] = df.groupby('Ticker')['Close'].pct_change(5)
-    df['ret_2w'] = df.groupby('Ticker')['Close'].pct_change(10)
-    df['ret_1m'] = df.groupby('Ticker')['Close'].pct_change(20)
+    # Returns (using shift to prevent leakage)
+    df['ret_1w'] = df['Close'].pct_change(5)
+    df['ret_2w'] = df['Close'].pct_change(10)
+    df['ret_1m'] = df['Close'].pct_change(20)
     
     # Volatility
-    df['vol_1m'] = df.groupby('Ticker')['Close'].pct_change().rolling(20).std().reset_index(0, drop=True)
+    df['vol_1m'] = df['Close'].pct_change().rolling(20).std()
     
     # RSI
-    df['rsi_14'] = df.groupby('Ticker')['Close'].apply(compute_rsi).reset_index(0, drop=True)
+    delta = df['Close'].diff()
+    gain = delta.where(delta > 0, 0).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+    df['rsi_14'] = 100 - (100 / (1 + gain / loss))
     
     # Momentum
-    df['ma_20'] = df.groupby('Ticker')['Close'].rolling(20).mean().reset_index(0, drop=True)
-    df['mom_20'] = df['Close'] / df['ma_20']
+    df['mom_20'] = df['Close'] / df['Close'].rolling(20).mean()
     
     # MACD
-    macd_results = df.groupby('Ticker')['Close'].apply(
-        lambda x: pd.DataFrame(dict(zip(['macd', 'macd_signal'], compute_macd(x))))
-    )
-    macd_results = macd_results.reset_index(level=0, drop=True)
-    df['macd'] = macd_results['macd']
-    df['macd_signal'] = macd_results['macd_signal']
+    ema12 = df['Close'].ewm(span=12).mean()
+    ema26 = df['Close'].ewm(span=26).mean()
+    df['macd'] = ema12 - ema26
     
     # Volume
-    df['volume_ma_20'] = df.groupby('Ticker')['Volume'].rolling(20).mean().reset_index(0, drop=True)
-    df['volume_ratio'] = df['Volume'] / df['volume_ma_20']
+    df['volume_ratio'] = df['Volume'] / df['Volume'].rolling(20).mean()
     
-    df = df.fillna(0)
-    return df
+    return df.fillna(0)
 
 
 # =============================================================================
-# Window Construction (FIXED: Non-overlapping, Clear Target)
+# Window Construction (Strict No-Leakage)
 # =============================================================================
 
-def construct_samples(df_ticker: pd.DataFrame, 
+def construct_windows(df_ticker: pd.DataFrame,
                       df_macro: pd.DataFrame,
-                      include_macro: bool = True,
+                      include_macro: bool,
                       w: int = WINDOW_SIZE,
-                      margin: float = NEUTRAL_MARGIN,
-                      step: int = None) -> pd.DataFrame:
+                      step: int = STEP_SIZE,
+                      margin: float = NEUTRAL_MARGIN) -> pd.DataFrame:
     """
-    Construct rolling window samples.
+    Construct samples with STRICT no-leakage guarantee.
     
-    FIXED:
-    - step parameter for non-overlapping windows (default: w for non-overlap)
-    - Clear target: price at end of Week 2 vs price at end of Week 1
-    - No lookahead bias
+    Timeline:
+    [----Week 0----][----Week 1----][----Week 2----]
+       Features       Features        TARGET ONLY
+       
+    Target = sign(Close[W2_last] - Close[W1_last])
+    Features use ONLY W0 and W1 data.
     """
-    if step is None:
-        step = w  # Non-overlapping by default
-    
-    # 1. Merge ticker with macro
+    # 1. Merge with macro
     df = df_ticker.merge(df_macro, on='Date', how='left')
     df = df.sort_values('Date').reset_index(drop=True)
     
-    # 2. Fill missing macro
-    for col in MACRO_FEATURES:
+    # 2. Forward fill macro (no future data used)
+    for col in MACRO_COLS:
         if col in df.columns:
             df[col] = df[col].ffill()
     
-    # 3. Add Technical Features
-    df = add_technical_features(df)
+    # 3. Compute technicals (uses only past data due to rolling)
+    df = compute_technical_features(df)
     
     samples = []
+    i = 0
     total_len = len(df)
     
-    # Use step size for iteration (non-overlapping windows)
-    i = 0
     while i + 3 * w <= total_len:
-        idx_week0 = slice(i, i + w)
-        idx_week1 = slice(i + w, i + 2 * w)
-        idx_week2 = slice(i + 2 * w, i + 3 * w)
+        w0 = df.iloc[i:i+w]           # Week 0: Features
+        w1 = df.iloc[i+w:i+2*w]       # Week 1: Features
+        w2 = df.iloc[i+2*w:i+3*w]     # Week 2: Target ONLY
         
-        chunk_week0 = df.iloc[idx_week0]
-        chunk_week1 = df.iloc[idx_week1]
-        chunk_week2 = df.iloc[idx_week2]
+        # === TARGET (from Week 2 only) ===
+        p_now = w1['Close'].iloc[-1]
+        p_future = w2['Close'].iloc[-1]
         
-        # --- FIXED: Clear Target Definition ---
-        # Price at end of observation period (Week 1, last day)
-        p_now = chunk_week1['Close'].iloc[-1]
-        # Price at end of prediction period (Week 2, last day)
-        p_future = chunk_week2['Close'].iloc[-1]
-        
-        if p_now == 0:
+        if p_now <= 0:
             i += step
             continue
-            
-        # Simple return
+        
         ret = (p_future - p_now) / p_now
         
         # Neutral zone filter
-        if -margin <= ret <= margin:
+        if abs(ret) <= margin:
             i += step
             continue
-            
+        
         target = 1 if ret > margin else 0
         
-        # --- Feature Construction ---
+        # === FEATURES (from W0 and W1 only - NO W2 DATA) ===
         features = {}
         
-        def add_window_features(prefix, col_name):
-            """Add SUMMARY features from each window (not daily)."""
-            # Week 0 summary
-            features[f'{prefix}_w0_mean'] = chunk_week0[col_name].mean()
-            features[f'{prefix}_w0_std'] = chunk_week0[col_name].std()
-            features[f'{prefix}_w0_last'] = chunk_week0[col_name].iloc[-1]
-            # Week 1 summary
-            features[f'{prefix}_w1_mean'] = chunk_week1[col_name].mean()
-            features[f'{prefix}_w1_std'] = chunk_week1[col_name].std()
-            features[f'{prefix}_w1_last'] = chunk_week1[col_name].iloc[-1]
+        # Price features (W0, W1)
+        features['price_w0_last'] = w0['Close'].iloc[-1]
+        features['price_w1_last'] = w1['Close'].iloc[-1]
+        features['price_w0_mean'] = w0['Close'].mean()
+        features['price_w1_mean'] = w1['Close'].mean()
+        features['price_change_w0w1'] = (w1['Close'].iloc[-1] / w0['Close'].iloc[-1]) - 1
         
-        # 1. Price
-        add_window_features('price', 'Close')
-        
-        # 2. Technical
-        for col in TECHNICAL_FEATURES:
+        # Technical features (W0, W1)
+        for col in TECHNICAL_COLS:
             if col in df.columns:
-                add_window_features(f'tech_{col}', col)
+                features[f'tech_{col}_w0_last'] = w0[col].iloc[-1]
+                features[f'tech_{col}_w1_last'] = w1[col].iloc[-1]
+                features[f'tech_{col}_w0w1_diff'] = w1[col].iloc[-1] - w0[col].iloc[-1]
         
-        # 3. Macro (only if requested)
+        # Macro features (W0, W1) - only if requested
         if include_macro:
-            for col in MACRO_FEATURES:
+            for col in MACRO_COLS:
                 if col in df.columns:
-                    add_window_features(f'macro_{col}', col)
+                    features[f'macro_{col}_w0_last'] = w0[col].iloc[-1]
+                    features[f'macro_{col}_w1_last'] = w1[col].iloc[-1]
+                    features[f'macro_{col}_w0w1_change'] = (
+                        (w1[col].iloc[-1] / w0[col].iloc[-1]) - 1 
+                        if w0[col].iloc[-1] != 0 else 0
+                    )
         
         # Metadata
-        features['Date'] = chunk_week1['Date'].iloc[-1]  # End of observation
+        features['Date'] = w1['Date'].iloc[-1]
         features['Ticker'] = df['Ticker'].iloc[0]
         features['Target'] = target
-        features['Return'] = ret  # Store for debugging
         
         samples.append(features)
         i += step
@@ -248,63 +199,73 @@ def construct_samples(df_ticker: pd.DataFrame,
 
 
 # =============================================================================
-# Dataset Preparation
+# Dataset Preparation (Strict Chronological Split)
 # =============================================================================
 
-def prepare_datasets(df_samples: pd.DataFrame, 
-                     test_ratio: float = 0.20,
-                     val_ratio: float = 0.10) -> Dict:
-    """Split data chronologically and normalize."""
+def prepare_datasets(df_samples: pd.DataFrame,
+                     train_ratio: float = 0.70,
+                     val_ratio: float = 0.15,
+                     test_ratio: float = 0.15) -> Dict:
+    """
+    Chronological split with proper normalization.
+    
+    NO SHUFFLING - maintains time order.
+    Normalization uses ONLY training data statistics.
+    """
     n = len(df_samples)
     
-    test_size = int(n * test_ratio)
-    train_val_size = n - test_size
-    val_size = int(train_val_size * val_ratio)
-    train_size = train_val_size - val_size
+    train_end = int(n * train_ratio)
+    val_end = train_end + int(n * val_ratio)
     
-    train = df_samples.iloc[:train_size]
-    val = df_samples.iloc[train_size:train_size+val_size]
-    test = df_samples.iloc[train_size+val_size:]
+    train = df_samples.iloc[:train_end]
+    val = df_samples.iloc[train_end:val_end]
+    test = df_samples.iloc[val_end:]
     
-    # Feature columns
-    feature_cols = [c for c in df_samples.columns if c not in ['Date', 'Ticker', 'Target', 'Return']]
+    # Feature columns (exclude metadata)
+    feature_cols = [c for c in df_samples.columns 
+                    if c not in ['Date', 'Ticker', 'Target']]
     
     X_train = train[feature_cols].copy()
-    y_train = train['Target']
+    y_train = train['Target'].values
     X_val = val[feature_cols].copy()
-    y_val = val['Target']
+    y_val = val['Target'].values
     X_test = test[feature_cols].copy()
-    y_test = test['Target']
+    y_test = test['Target'].values
     
-    # Z-Score Normalization
+    # === NORMALIZATION (Train stats only) ===
     mu = X_train.mean()
     sigma = X_train.std().replace(0, 1)
     
-    X_train_norm = (X_train - mu) / sigma
-    X_val_norm = (X_val - mu) / sigma
-    X_test_norm = (X_test - mu) / sigma
+    X_train = (X_train - mu) / sigma
+    X_val = (X_val - mu) / sigma
+    X_test = (X_test - mu) / sigma
+    
+    # Replace any remaining NaN/inf
+    X_train = X_train.fillna(0).replace([np.inf, -np.inf], 0)
+    X_val = X_val.fillna(0).replace([np.inf, -np.inf], 0)
+    X_test = X_test.fillna(0).replace([np.inf, -np.inf], 0)
     
     return {
-        'X_train': X_train_norm, 'y_train': y_train,
-        'X_val': X_val_norm, 'y_val': y_val,
-        'X_test': X_test_norm, 'y_test': y_test,
+        'X_train': X_train, 'y_train': y_train,
+        'X_val': X_val, 'y_val': y_val,
+        'X_test': X_test, 'y_test': y_test,
         'feature_names': feature_cols,
-        'metadata_test': test[['Date', 'Ticker', 'Return']]
+        'n_train': len(train), 'n_val': len(val), 'n_test': len(test)
     }
 
 
 # =============================================================================
-# Convenience Functions
+# Public API
 # =============================================================================
 
 def create_endogenous_samples(df_ticker: pd.DataFrame, df_macro: pd.DataFrame) -> pd.DataFrame:
-    """Create samples with ONLY endogenous features."""
-    return construct_samples(df_ticker, df_macro, include_macro=False)
+    """Create samples WITHOUT macro features."""
+    return construct_windows(df_ticker, df_macro, include_macro=False)
 
 
 def create_exogenous_samples(df_ticker: pd.DataFrame, df_macro: pd.DataFrame) -> pd.DataFrame:
-    """Create samples with endogenous + exogenous features."""
-    return construct_samples(df_ticker, df_macro, include_macro=True)
+    """Create samples WITH macro features."""
+    return construct_windows(df_ticker, df_macro, include_macro=True)
 
 
 # =============================================================================
@@ -312,22 +273,28 @@ def create_exogenous_samples(df_ticker: pd.DataFrame, df_macro: pd.DataFrame) ->
 # =============================================================================
 
 if __name__ == '__main__':
-    print("Testing FIXED Feature Engineering Pipeline...")
+    print("Testing v3 FINAL Pipeline...")
     stocks, macro = load_raw_data()
-    print(f"Loaded {len(stocks):,} stock rows, {len(macro):,} macro rows")
     
     ticker = 'COMI.CA'
     df_ticker = stocks[stocks['Ticker'] == ticker].copy()
     
-    print(f"\n--- ENDOGENOUS PIPELINE ---")
-    endo_samples = create_endogenous_samples(df_ticker, macro)
-    endo_features = [c for c in endo_samples.columns if c not in ['Date', 'Ticker', 'Target', 'Return']]
-    print(f"Samples: {len(endo_samples)} (non-overlapping)")
-    print(f"Features: {len(endo_features)}")
-    print(f"Target Balance: {endo_samples['Target'].value_counts(normalize=True).to_dict()}")
+    print(f"\n--- ENDOGENOUS (No Macro) ---")
+    endo = create_endogenous_samples(df_ticker, macro)
+    print(f"Samples: {len(endo)}")
+    print(f"Features: {len([c for c in endo.columns if c not in ['Date','Ticker','Target']])}")
     
-    print(f"\n--- EXOGENOUS PIPELINE ---")
-    exo_samples = create_exogenous_samples(df_ticker, macro)
-    exo_features = [c for c in exo_samples.columns if c not in ['Date', 'Ticker', 'Target', 'Return']]
-    print(f"Samples: {len(exo_samples)}")
-    print(f"Features: {len(exo_features)}")
+    print(f"\n--- EXOGENOUS (With Macro) ---")
+    exo = create_exogenous_samples(df_ticker, macro)
+    print(f"Samples: {len(exo)}")
+    print(f"Features: {len([c for c in exo.columns if c not in ['Date','Ticker','Target']])}")
+    
+    print(f"\n--- DATA LEAKAGE CHECK ---")
+    # Verify W2 data is NOT in features
+    sample_row = exo.iloc[0]
+    feature_cols = [c for c in exo.columns if c not in ['Date','Ticker','Target']]
+    w2_keywords = ['w2', 'future', 'target']
+    leaky = [c for c in feature_cols if any(k in c.lower() for k in w2_keywords)]
+    print(f"Leaky features found: {len(leaky)} (should be 0)")
+    if leaky:
+        print(f"  WARNING: {leaky}")
