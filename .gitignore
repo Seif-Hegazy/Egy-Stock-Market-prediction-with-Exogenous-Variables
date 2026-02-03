@@ -67,7 +67,7 @@ airflow/airflow-webserver.pid
 # Model files (large)
 *.h5
 *.pkl
-*.joblib
+
 *.gguf
 *.bin
 models/*.bin

@@ -26,61 +26,35 @@ from src.data_loader import (
     create_endogenous_samples,
     create_exogenous_samples,
     prepare_datasets,
-    MIN_SAMPLES
+    compute_fixed_percentile_threshold,
+    MIN_SAMPLES,
+    THRESHOLD_PERCENTILE
 )
 from src.models import train_model, evaluate_model
 from src.validation import diebold_mariano_test, compute_squared_loss, is_significant
+import joblib
 
 warnings.filterwarnings('ignore')
 
 RESULTS_DIR = Path(__file__).parent / 'results'
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
+MODELS_DIR = Path(__file__).parent / 'models'
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
 MIN_BASELINE_F1 = 0.25  # Relaxed to include more tickers
 
 
-def find_optimal_threshold_youden(model, X_val, y_val) -> float:
-    """
-    Find threshold using Youden's J statistic.
-    J = Sensitivity + Specificity - 1 = TPR - FPR
-    
-    This is the standard method for finding optimal classification threshold.
-    Maximizes the distance from the random guess line on ROC curve.
-    """
-    probs = model.predict_proba(X_val)[:, 1]
-    
-    best_thresh = 0.5
-    best_j = -1
-    
-    # Wide search range
-    for thresh in np.arange(0.20, 0.81, 0.01):
-        preds = (probs >= thresh).astype(int)
-        
-        # Need both classes predicted
-        if len(np.unique(preds)) == 1:
-            continue
-        
-        # Confusion matrix
-        tn, fp, fn, tp = confusion_matrix(y_val, preds).ravel()
-        
-        # Sensitivity (TPR) and Specificity (TNR)
-        sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
-        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
-        
-        # Youden's J
-        j = sensitivity + specificity - 1
-        
-        if j > best_j:
-            best_j = j
-            best_thresh = thresh
-    
-    return best_thresh
+def apply_fixed_threshold(model, X, threshold):
+    """Apply fixed probability threshold."""
+    probs = model.predict_proba(X)[:, 1]
+    return (probs >= threshold).astype(int)
 
 
 def run_experiment():
     print("=" * 70)
-    print("EGX MACRO SIGNIFICANCE STUDY (v5 FINAL)")
-    print("Youden's J threshold | Wide search | Relaxed filtering")
+    print("EGX MACRO SIGNIFICANCE STUDY (v9 FINAL)")
+    print("Log Returns | Purged Split | Correct DM Direction")
     print("=" * 70)
     
     print("\n[1] Loading Data...")
@@ -97,75 +71,59 @@ def run_experiment():
     for ticker in tqdm(tickers):
         df_ticker = stocks[stocks['Ticker'] == ticker].copy()
         
-        if len(df_ticker) < 500:
-            continue
-        
-        # Create pipelines
+        # Create Endogenous Samples (Base)
         samples_endo = create_endogenous_samples(df_ticker, macro)
-        samples_exo = create_exogenous_samples(df_ticker, macro)
-        
         if len(samples_endo) < MIN_SAMPLES:
             skipped['samples'].append(ticker)
             continue
-        
-        # Prepare datasets
+            
         data_endo = prepare_datasets(samples_endo)
-        data_exo = prepare_datasets(samples_exo)
         
-        train_pos_ratio = data_endo['y_train'].mean()
-        
-        # === Train Endogenous Model ===
-        try:
-            model_endo = train_model(
-                data_endo['X_train'], data_endo['y_train'],
-                data_endo['X_val'], data_endo['y_val']
-            )
-        except Exception as e:
-            print(f"  ERROR {ticker} (endo): {e}")
-            continue
-        
-        # Youden's J threshold
-        thresh_endo = find_optimal_threshold_youden(
-            model_endo, data_endo['X_val'], data_endo['y_val']
+        # Train Endogenous (Baseline)
+        model_endo = train_model(
+            data_endo['X_train'], data_endo['y_train'],
+            data_endo['X_val'], data_endo['y_val']
         )
         
-        # Evaluate
+        # --- THRESHOLD SELECTION (Fixed 40th Percentile) ---
+        probs_val_endo = model_endo.predict_proba(data_endo['X_val'])[:, 1]
+        thresh_endo = compute_fixed_percentile_threshold(data_endo['y_val'], probs_val_endo)
+        
+        # Evaluate Endogenous
         metrics_endo = evaluate_model(
             model_endo, data_endo['X_test'], data_endo['y_test'], thresh_endo
         )
+        auc_endo = roc_auc_score(data_endo['y_test'], model_endo.predict_proba(data_endo['X_test'])[:, 1])
         
-        # Relaxed quality gate
+        # Skip if baseline is too poor (random guessing)
         if metrics_endo['f1'] < MIN_BASELINE_F1:
-            skipped['baseline'].append((ticker, metrics_endo['f1']))
+            skipped['baseline'].append(ticker)
             continue
         
-        # === Train Exogenous Model ===
-        try:
-            model_exo = train_model(
-                data_exo['X_train'], data_exo['y_train'],
-                data_exo['X_val'], data_exo['y_val']
-            )
-        except Exception as e:
-            print(f"  ERROR {ticker} (exo): {e}")
+        # --- EXOGENOUS MODEL ---
+        samples_exo = create_exogenous_samples(df_ticker, macro)
+        
+        # ALIGNMENT CHECK: Ensure same samples
+        if len(samples_exo) != len(samples_endo):
+            print(f"  WARN {ticker}: Sample mismatch endo={len(samples_endo)} exo={len(samples_exo)}")
             continue
         
-        # Youden's J threshold
-        thresh_exo = find_optimal_threshold_youden(
-            model_exo, data_exo['X_val'], data_exo['y_val']
+        data_exo = prepare_datasets(samples_exo)
+        
+        model_exo = train_model(
+            data_exo['X_train'], data_exo['y_train'],
+            data_exo['X_val'], data_exo['y_val']
         )
         
+        # Threshold Selection (Fixed 40th Percentile)
+        probs_val_exo = model_exo.predict_proba(data_exo['X_val'])[:, 1]
+        thresh_exo = compute_fixed_percentile_threshold(data_exo['y_val'], probs_val_exo)
+        
+        # Evaluate Exogenous
         metrics_exo = evaluate_model(
             model_exo, data_exo['X_test'], data_exo['y_test'], thresh_exo
         )
-        
-        # === ROC-AUC for probability quality ===
-        try:
-            auc_endo = roc_auc_score(data_endo['y_test'], 
-                                      model_endo.predict_proba(data_endo['X_test'])[:, 1])
-            auc_exo = roc_auc_score(data_exo['y_test'],
-                                     model_exo.predict_proba(data_exo['X_test'])[:, 1])
-        except:
-            auc_endo = auc_exo = 0.5
+        auc_exo = roc_auc_score(data_exo['y_test'], model_exo.predict_proba(data_exo['X_test'])[:, 1])
         
         # === Statistical Test ===
         probs_endo = model_endo.predict_proba(data_endo['X_test'])[:, 1]
@@ -179,12 +137,40 @@ def run_experiment():
         # Compute lift
         lift = (metrics_exo['f1'] - metrics_endo['f1']) / metrics_endo['f1'] if metrics_endo['f1'] > 0 else 0
         
-        significant = is_significant(p_value) and lift > 0
+        significant = is_significant(p_value) and dm_stat > 0 and lift > 0
+        
+        # === SAVE MODELS ===
+        ticker_clean = ticker.replace('.', '_')
+        
+        # Save Endogenous model
+        endo_model_data = {
+            'model': model_endo,
+            'threshold': thresh_endo,
+            'mu': data_endo['mu_train'],
+            'sigma': data_endo['sigma_train'],
+            'feature_names': data_endo['feature_names'],
+            'metrics': metrics_endo,
+            'auc': auc_endo
+        }
+        joblib.dump(endo_model_data, MODELS_DIR / f'{ticker_clean}_endo.joblib')
+        
+        # Save Exogenous model
+        exo_model_data = {
+            'model': model_exo,
+            'threshold': thresh_exo,
+            'mu': data_exo['mu_train'],
+            'sigma': data_exo['sigma_train'],
+            'feature_names': data_exo['feature_names'],
+            'metrics': metrics_exo,
+            'auc': auc_exo,
+            'significant': significant
+        }
+        joblib.dump(exo_model_data, MODELS_DIR / f'{ticker_clean}_exo.joblib')
         
         res = {
             'Ticker': ticker,
             'Samples': len(samples_endo),
-            'Train_Pos_Ratio': round(train_pos_ratio, 3),
+            'Train_Pos_Ratio': round(data_endo['train_pos_ratio'], 3),
             'Test': data_endo['n_test'],
             
             'Endo_F1': round(metrics_endo['f1'], 4),
@@ -215,11 +201,11 @@ def run_experiment():
     
     # Save
     df_results = pd.DataFrame(results)
-    df_results.to_csv(RESULTS_DIR / 'experiment_results_v5.csv', index=False)
+    df_results.to_csv(RESULTS_DIR / 'experiment_results_v9.csv', index=False)
     
     # Summary
     print("\n" + "=" * 70)
-    print("EXPERIMENT SUMMARY (v5 FINAL)")
+    print("EXPERIMENT SUMMARY (v9 FINAL)")
     print("=" * 70)
     
     print(f"\nFiltering:")

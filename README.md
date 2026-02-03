@@ -1,56 +1,62 @@
 # EGX Macro Significance Study
 
-A research framework to test whether macroeconomic variables (Gold, Oil, VIX, USD/EGP) improve stock direction prediction for the Egyptian Stock Exchange (EGX30).
+**Evaluating the impact of macroeconomic variables on EGX 100 stock prediction**
 
-## 🏗️ Repository Structure
-
-```
-Grad Project/
-├── main.py               # PRIMARY ENTRY POINT - Run the experiment
-├── src/                  # Core Source Code
-│   ├── data_loader.py    # 5-day rolling window construction
-│   ├── models.py         # CatBoost/HGB/RF model implementations
-│   └── validation.py     # Statistical testing (Diebold-Mariano)
-├── data/
-│   └── raw/              # Raw CSV data (stocks, economic, global)
-├── results/              # Experiment outputs (CSVs, heatmaps)
-├── archive/              # Old experiments and legacy code
-├── airflow/              # Automated data collection DAGs
-├── services/             # Dashboard and Sentiment API
-└── docs/                 # Planning documents
-```
-
-## 🧠 Research Framework
-
-**Hypothesis:** "Global/local macroeconomic variables improve weekly stock direction prediction for EGX30 stocks."
-
-**Methodology:**
-- **Window**: 5-Day rolling ($W_0 + W_1 \to Target_{W2}$)
-- **Model**: CatBoost (Default), HGB, Random Forest
-- **Threshold**: Fixed 40th Percentile (Q0.40)
-- **Baseline**: Technicals Only (Price + RSI + Volatility + Momentum)
-- **Test**: Technicals + Macro (Gold, Oil, VIX, USD, Interest Rates)
-
-## 🚀 Quick Start
+## Quick Start
 
 ```bash
 # Install dependencies
 pip install -r requirements.txt
 
-# Run the experiment
-python3 main.py
+# Run experiment
+python main.py
 ```
 
-## 📊 Key Findings
+## Project Structure
 
-| Ticker | Sector | Lift | Insight |
-|--------|--------|------|---------|
-| **SAUD.CA** | Construction | +45.8% | Macro cycles drive this sector |
-| **ETEL.CA** | Telecom | +10.4% | Import/USD sensitivity |
-| **CICH.CA** | Financials | +3.1% | Consistent alpha |
+```
+├── main.py                    # Main experiment script (v9 FINAL)
+├── src/                       # Core source code
+│   ├── data_loader.py         # Feature engineering & data prep
+│   ├── models.py              # CatBoost training
+│   └── validation.py          # Statistical testing (DM test)
+├── data/raw/                  # Raw data files
+│   ├── stocks/                # EGX stock data (274k rows)
+│   └── economic/              # Macro data (CBE, global markets)
+├── results/                   # Experiment results
+│   └── experiment_results_v9.csv  # Final results
+├── models/                    # Saved trained models (152 files)
+├── documentation/             # Methodology documentation
+│   └── METHODOLOGY.md         # Complete methodology & results
+├── scripts/                   # Utility scripts
+├── archive/                   # Old versions & deprecated files
+└── requirements.txt           # Python dependencies
+```
 
-**Conclusion:** Macro data significantly improves prediction for Construction, Telecom, and Financial sectors.
+## Key Results
 
-## 📝 License
+| Metric | Value |
+|--------|-------|
+| Analyzed Tickers | 76 |
+| **Significant Winners** | **18 (24%)** |
+| Mean F1 Lift | -0.1% |
+| Mean AUC Lift | -0.29% |
 
-MIT License
+## Methodology (v9)
+
+1. **Features:** Log returns (stationary) from OHLCV + macro changes
+2. **Split:** 72/8/20 with purge gap (no leakage)
+3. **Model:** CatBoost with early stopping
+4. **Testing:** Diebold-Mariano with corrected direction
+
+## Documentation
+
+See `documentation/METHODOLOGY.md` for complete methodology, feature engineering details, and results analysis.
+
+## Models
+
+Trained models saved in `models/` directory:
+- `{TICKER}_endo.joblib` - Endogenous model (OHLCV only)
+- `{TICKER}_exo.joblib` - Exogenous model (OHLCV + Macro)
+
+Each model file includes: model, threshold, normalization params, metrics.
